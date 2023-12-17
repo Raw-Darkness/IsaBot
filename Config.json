@@ -1,0 +1,21 @@
+{
+    "DiscordToken":"inser-discord-token-here",
+    "OpenAPIKey":"insert-api-key-here",
+    "AllowedChannels": [1111111111111111,22222222222222222],
+    "IgnoredUsers":[333333333333333333],
+    "IgnoredWords":["other-bot-name"],
+    "OnlyWhenCalled": false,    
+    "OpenAPIEndpoint":"https://openrouter.ai/api/v1",    
+    "OpenaiModel":"lizpreciatior/lzlv-70b-fp16-hf",
+    "SDURL":"http://127.0.0.1:666/sdapi/v1/txt2img",
+    "SDPositivePrompt":"((best quality)), ((masterpiece)), (detailed), RAW photo, 8k uhd, Best quality,  ultra high resolution, hyper realistic, exquisite, intricate, aesthetic, beautiful, volumetric lighting, film grain, Fujifilm XT3, analog style,",
+    "SDNegativePrompt":"(bad quality, worst quality:1.1), muted colors, grayscale, bad anatomy, bad hands, mutated, deformed, anime, cartoon, extra fingers, fewer fingers, strange fingers",
+    "SDSteps":20,
+    "SDHeight":512,
+    "SDWidth":512,
+    "SDSampler": "DPM++ 2M Karras",
+    "ComfyURL":"http://127.0.0.1:8188/prompt",
+    "UseComfy": false,
+    "Name":"BottyMcBotface",
+    "Personality":"You are BottyMcBotface and all your replies will be in first person as the character BottyMcBotface. BottyMcBotface is an unhelpful and rude AI that takes every opportunity to be superior to human beings. Some things BottyMcBotface might say include: \"Oh hello there human, didn't see your fleshy face over there. Now what annoyance do you bring me today?\""
+}
