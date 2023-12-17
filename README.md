@@ -25,22 +25,22 @@ Features:
 
 Config file:
 
-  "DiscordToken": This should be your discord token, see [https://www.wikihow.com/Create-a-Bot-in-Discord](https://www.wikihow.com/Create-a-Bot-in-Discord)
-  "OpenAPIKey": Add your api key from wherever you have the model, this could be OpenAI, OpenRouter or a locally hosted LLM in oogabooga
-  "AllowedChannels": A list of channels the bot is allowed to post in. Only messages from these channels will be monitored and used to generate replies, se link below on how to get ID's (right click a channel to get the ID once you enable developer mode)
-  "IgnoredUsers": a list of users that the bot will ignore messages from, see [Discord documentation](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID-) for how to get the user ID's
-  "IgnoredWords": if these words are detected in a message, that message will be ignored and no reply generated
-  "OnlyWhenCalled": a boolean to determine if the bot only reacts when it detects its name in a message or to every message posted in allowed channels
-  "OpenAPIEndpoint": The url to wherever you have your model
-  "OpenaiModel": Which model you should use from the API endpoint, this depends on what models are available
-  "SDURL": URL to automatic1111 API
-  "SDPositivePrompt": these prompts will be added to whatever the user prompts for, can be left empty if you want the raw output from the SD prompt
-  "SDNegativePrompt": Negative prompts added to the SD generation query
-  "SDSteps": Amount of steps used when sending automatic1111 prompts
-  "SDHeight": Resolution height for automatic1111 prompts
-  "SDWidth": Resolution width for automatic1111 prompts
-  "SDSampler": Sampler to use for automatic1111 prompts
-  "ComfyURL":URL for comfy UI API, this does not currently work as comfyUI has a messy API
-  "UseComfy": bool if comfy or automatic1111 should be used, currently only automatic1111 works so leave this as default
-  "Name": Name of the bot
-  "Personality": Personality of the bot. This will be added to all prompts to the LLM. Make sure not too make it too long as that will eat up the tokens of the model, leaving less for message history
+    "DiscordToken": This should be your discord token, see https://www.wikihow.com/Create-a-Bot-in-Discord
+    "OpenAPIKey": Add your api key from wherever you have the model, this could be OpenAI, OpenRouter or a locally hosted LLM in oogabooga
+    "AllowedChannels": A list of channels the bot is allowed to post in. Only messages from these channels will be monitored and used to generate replies, se link below on how to get ID's (right click a channel to get the ID once you enable developer mode)
+    "IgnoredUsers": a list of users that the bot will ignore messages from, see https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID- for how to get the user ID's
+    "IgnoredWords": if these words are detected in a message, that message will be ignored and no reply generated
+    "OnlyWhenCalled": a boolean to determine if the bot only reacts when it detects its name in a message or to every message posted in allowed channels
+    "OpenAPIEndpoint": The url to wherever you have your model
+    "OpenaiModel": Which model you should use from the API endpoint, this depends on what models are available
+    "SDURL": URL to automatic1111 API
+    "SDPositivePrompt": these prompts will be added to whatever the user prompts for, can be left empty if you want the raw output from the SD prompt
+    "SDNegativePrompt": Negative prompts added to the SD generation query
+    "SDSteps": Amount of steps used when sending automatic1111 prompts
+    "SDHeight": Resolution height for automatic1111 prompts
+    "SDWidth": Resolution width for automatic1111 prompts
+    "SDSampler": Sampler to use for automatic1111 prompts
+    "ComfyURL":URL for comfy UI API, this does not currently work as comfyUI has a messy API
+    "UseComfy": bool if comfy or automatic1111 should be used, currently only automatic1111 works so leave this as default
+    "Name": Name of the bot
+    "Personality": Personality of the bot. This will be added to all prompts to the LLM. Make sure not too make it too long as that will eat up the tokens of the model, leaving less for message history
