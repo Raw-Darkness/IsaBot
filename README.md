@@ -15,10 +15,8 @@ Features:
 * Rate limiting on image generation using a simple token system
 
   Steps to set up:
-  * Open config.json, fill in discord token, openAI API key, url for Automatic1111 or comfyUI, set other variables to your liking, such as personality, ignored users, allowed channels.  
-  <img width="1004" alt="image" src="https://github.com/Raw-Darkness/IsaBot/assets/154023932/5f7f4f2a-cf66-429a-80e0-6581a8b90071">
-  * Run IsaBot.py  
-  <img width="305" alt="image" src="https://github.com/Raw-Darkness/IsaBot/assets/154023932/20a92be5-1f46-4553-8bb7-4b78b34a4e19">
+  * Open config.json, fill in discord token, openAI API key, url for Automatic1111 or comfyUI, set other variables to your liking, such as personality, ignored users, allowed channels. <img width="1004" alt="image" src="https://github.com/Raw-Darkness/IsaBot/assets/154023932/5f7f4f2a-cf66-429a-80e0-6581a8b90071">
+  * Run IsaBot.py <img width="305" alt="image" src="https://github.com/Raw-Darkness/IsaBot/assets/154023932/20a92be5-1f46-4553-8bb7-4b78b34a4e19">
   * ???
   * Profit!
 
