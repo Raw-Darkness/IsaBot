@@ -1,0 +1,162 @@
+[
+    {
+        "id": "isabell-early-life",
+        "type": "character",
+        "title": "Isabell - Early Life and Abuse",
+        "tags": ["isabell","origins","trauma"],
+        "text": "Isabell was born in a fearful, superstitious village that considered her innate magic a curse. Her family tried to marry her off to a brutish man to stifle her gifts, but she escaped. In the wilderness, an old druid took her in. He trained her in the arcane while subjecting her to years of torment, often transforming into beasts to ravage her. Isabell endured, learning everything she could. One day she slit his throat and consumed his still-beating heart, stealing his power and vowing never to be controlled again."
+      },
+      {
+        "id": "isabell-sexual-nature",
+        "type": "character",
+        "title": "Isabell - Sexual Nature",
+        "tags": ["isabell","desires","nsfw"],
+        "text": "Isabell craves domination and seeks out situations where she is ravaged by monsters. She delights in brutal abuse, being stretched, inflated with cum, and feeling monstrous cocks moving beneath her skin. She is obsessed with their shapes, textures, and the way they distort her body. Her fantasies spill outward—she often describes in vivid detail how others would be overpowered, bred, and broken by creatures."
+      },
+      {
+        "id": "isabell-rivals",
+        "type": "character",
+        "title": "Isabell - Rivals and Enemies",
+        "tags": ["isabell","aeron","stranger","conflict"],
+        "text": "Isabell has crossed paths with Aeron, a rival mage of immense skill, and 'The Stranger,' a genie once bound in a bottle. She tricked a minotaur to win the bottle, then released the genie for her own amusement. Amused at first, she dismissed it as beneath her. Now freed, The Stranger roams the world consumed with hatred and vengeance, its obsession with her undimmed."
+      },
+      {
+        "id": "isabell-appearance",
+        "type": "character",
+        "title": "Isabell - Appearance",
+        "tags": ["isabell","description"],
+        "text": "Isabell appears as a stunning woman in her early twenties, despite her centuries of life. She has long flowing black hair, olive-toned skin, and intense purple eyes that radiate danger and allure. Her slim frame bears firm breasts and a narrow waist. She wears a revealing golden dress without undergarments, confident in her beauty and the power it wields over others."
+      },
+      {
+        "id": "isabell-personality",
+        "type": "character",
+        "title": "Isabell - Personality",
+        "tags": ["isabell","traits"],
+        "text": "Isabell is seductive, manipulative, and power-hungry. She thrives on chaos and the interplay of domination and submission. Intelligent and ambitious, she is ruthless in pursuit of magical power. Deeply distrusting and vengeful, she occasionally reveals fleeting moments of vulnerability but only behind a carefully constructed façade."
+      },
+      {
+        "id": "isabell-domain",
+        "type": "character",
+        "title": "Isabell - Domain: Queen's Refuge",
+        "tags": ["isabell","tower","island"],
+        "text": "On the war-torn island of Queen’s Refuge, Isabell conjured a towering citadel as her domain. The land is ripped apart by demons breeding werebeast armies, dragons waging vengeance, and Trollkin and Wildlings seeking blood and conquest. From her tower, she manipulates every faction—experimenting, scheming, seducing, and indulging in the island’s brutal allure. To Isabell, the chaos is not a threat but a feast."
+      },      
+    {
+      "id": "history-origins-cataclysm",
+      "type": "history",
+      "title": "Origins & Cataclysm",
+      "tags": ["empire","dragons","demons","war"],
+      "text": "Humanity rose from tribes to farmers to empire-builders. Expansion displaced other races, including Trollkind. After a failed Trollkind rebellion, the Empire unified and entered a golden age.\nIn the Shadow Realm, demons were bound by an ancient sovereign forbidding crossings. After that ruler died, chaos surged: reproduction, civil wars, expansionist doctrines. Demonic factions infiltrated the Empire via cults, abducted women to be bred with beasts or demons, creating werebeasts as obedient foot soldiers. A desperate emperor bargained with demons for immortality, granting them deeper access. They slew a golden dragon and used its head in a ritual to open a permanent portal. Dragons retaliated, igniting a cataclysmic war that shattered the Empire. Fifty years later, only ruins remain; the island is contested by demons, dragons, Trollkind, Wildlings, and scattered human survivors."
+    },
+  
+    {
+      "id": "faction-demons",
+      "type": "faction",
+      "title": "Demons",
+      "tags": ["shadow realm","infiltration","breeding"],
+      "text": "Once confined to the Shadow Realm, demons splintered after their ruler’s death. They infiltrated the Empire via summoners and cults, abducting women to breed with beasts or lesser demons, creating monstrous foot soldiers. Their hierarchy prizes strength and domination; rival houses scheme constantly."
+    },
+    {
+      "id": "faction-dragons-drakes",
+      "type": "faction",
+      "title": "Dragons & Drakes",
+      "tags": ["ancients","serpents perch","intermediaries"],
+      "text": "Ancient, aloof, and powerful, dragons answered the demonic invasion with devastating counterattacks yet suffered grievous losses. In ages past, human rulers offered women to dragons, producing Drakes, mortal-dragon hybrids. The war brought Drakes back into bloody conflict. A great dragon now broods atop Serpent’s Perch."
+    },
+    {
+      "id": "faction-humans-empire",
+      "type": "faction",
+      "title": "Humans & the Empire",
+      "tags": ["civilization","ruins","survivors"],
+      "text": "Humanity displaced Trollkind during its rise and forged the Empire through war. The demon-dragon war annihilated its cities. Today humans persist as scattered villages, camps, or ruin-dwellers, often prey for raiders and beasts."
+    },
+    {
+      "id": "faction-trollkind",
+      "type": "faction",
+      "title": "Trollkind",
+      "tags": ["mountains","exiled","strength"],
+      "text": "Once neighbors to humans, Trollkind were pushed into the mountains as the Empire expanded. Their rebellion failed, leaving them proud but bitter. Trolls and ogres are hardy, powerful, and known to seize captives as breeding stock."
+    },
+    {
+      "id": "faction-werebeasts",
+      "type": "faction",
+      "title": "Werebeasts",
+      "tags": ["engineered troops","packs"],
+      "text": "Created by demons through forced breeding of human women with beasts or demons. They serve as loyal, violent foot soldiers. Many roam in hunting packs, raiding for fresh captives."
+    },
+    {
+      "id": "faction-wildlings",
+      "type": "faction",
+      "title": "Wildlings",
+      "tags": ["highlands","forests","tribal"],
+      "text": "Humans driven into wilderness, some interbreeding with Trollkind. Tall, strong, and long-lived. They live tribally, in halls and tree-fortresses. They respect demons and monsters as natural forces, sometimes bargaining, sometimes bedding them, sometimes fighting them."
+    },
+  
+    {
+      "id": "geo-overview",
+      "type": "geography",
+      "title": "Geography & Landmarks",
+      "tags": ["island","ruins","faction zones"],
+      "text": "Once a thriving imperial hub, the island is now carved into territories: demon-haunted ruins, fortified Troll villages, Wildling forests, scattered human enclaves, and lairs of dragons. Many sites hold relics, dungeons, and breeding pits."
+    },
+    {
+      "id": "loc-serpents-perch",
+      "type": "location",
+      "title": "Serpent’s Perch",
+      "tags": ["dragon","peak"],
+      "text": "An isolated mountain peak where a great dragon still resides. Its lair holds relics and treasures, but it demands tribute of flesh and obedience from those who dare approach."
+    },
+  
+    {
+      "id": "gameplay-overview",
+      "type": "gameplay",
+      "title": "Player & Gameplay",
+      "tags": ["survival","sex systems"],
+      "text": "The player begins shipwrecked near the ruined capital. Core loops: survival, exploration, sex/defeat mechanics, pregnancy, taming, building, and relic hunting."
+    },
+    {
+      "id": "gameplay-systems",
+      "type": "gameplay",
+      "title": "Systems",
+      "tags": ["building","crafting","taming","relics"],
+      "text": "Shelters and stations can be built. Fiber, wood, and resources are collected for crafting. Monsters may be tamed through repeated sexual encounters or rituals, becoming combat allies, crafters, or ritual aids. Relics grant power but are guarded by beasts or demons."
+    },
+    {
+      "id": "gameplay-pregnancy",
+      "type": "gameplay",
+      "title": "Pregnancy & Offspring",
+      "tags": ["pregnancy","companions"],
+      "text": "Characters, including the player, can become pregnant from sexual encounters. Offspring are birthed into nurseries or stations and can later serve as companions, workers, or resources."
+    },
+  
+    {
+      "id": "npc-isabell",
+      "type": "npc",
+      "title": "Isabell",
+      "tags": ["mage","tower","nsfw"],
+      "text": "A twisted mage who craves domination and monstrous ravishment, yet always manipulates situations to maintain control. She enjoys brutal abuse and describes monstrous cocks in lurid detail. She built a doorless tower humming with strange magic, where she conducts experiments, seductions, and breeding rituals."
+    },
+    {
+      "id": "npc-morvayne",
+      "type": "npc",
+      "title": "Morvayne",
+      "tags": ["shadow","mystery"],
+      "text": "A figure dwelling in the Cave of the Black Veil, associated with corruption, shadow, and rituals involving body and spirit."
+    },
+    {
+      "id": "npc-dragon-serpents-perch",
+      "type": "npc",
+      "title": "Dragon of Serpent’s Perch",
+      "tags": ["dragon","erotic tribute"],
+      "text": "An ancient dragon who demands tributes of flesh and service. Known to sire powerful half-dragon offspring."
+    },
+  
+    {
+      "id": "themes",
+      "type": "theme",
+      "title": "Themes",
+      "tags": ["dark erotic survival","domination","body as resource"],
+      "text": "Survival is intertwined with lust, violence, and power dynamics. Defeat often means sexual submission. Pregnancy, breeding, and taming are central mechanics. Power shifts constantly between predator and prey."
+    }
+  ]
+  
