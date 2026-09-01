@@ -947,35 +947,64 @@ async def honeypot_guard(message: discord.Message) -> bool:
         except Exception:
             logging.exception("Could not delete honeypot message")
 
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
-        total_deleted = 0
-
-        async def purge_channel(ch: discord.TextChannel) -> int:
-            try:
-                me = guild.me or await guild.fetch_member(bot.user.id)
-                perms = ch.permissions_for(me)
-                if not (perms.read_message_history and perms.manage_messages):
-                    return 0
-                deleted = await ch.purge(
-                    limit=None, after=cutoff,
-                    check=lambda m: m.author.id == member.id,
-                    bulk=True,
-                )
-                return len(deleted)
-            except Exception:
-                return 0
-
-        for ch in guild.text_channels:
-            total_deleted += await purge_channel(ch)
-
         reason = f"Posted in honeypot channel ({TRAP_CHANNEL_ID})"
-        kicked_ok = False
+        action = str(config.get("HoneypotAction", "kick")).lower()
+        delete_seconds = max(0, min(604800, int(config.get("HoneypotDeleteSeconds", 600))))
+        removal_word = "banned" if action == "ban" else "kicked"
+        removed_ok = False
+        total_deleted = -1  # -1 = Discord wiped messages server-side
+
+        # Ban with delete_message_seconds so Discord deletes the user's recent
+        # messages server-side — this also catches messages the history endpoint
+        # hasn't surfaced yet and ones posted mid-cleanup, which a manual purge
+        # misses. With HoneypotAction "kick" (default) the ban is lifted right
+        # away ("softban"), so the user can rejoin like after a normal kick.
         try:
-            await guild.kick(member, reason=reason)
-            kicked_ok = True
-            logging.info("Honeypot: kicked %s; deleted ~%d msgs.", member, total_deleted)
+            await guild.ban(member, reason=reason, delete_message_seconds=delete_seconds)
+            if action != "ban":
+                await guild.unban(member, reason="Honeypot softban — kick semantics")
+            removed_ok = True
+            logging.info("Honeypot: %s %s (server-side wipe of last %ds).", removal_word, member, delete_seconds)
+        except discord.Forbidden:
+            logging.warning("Honeypot: no ban permission; falling back to kick + manual purge")
         except Exception:
-            logging.exception("Honeypot: failed to kick")
+            logging.exception("Honeypot: ban failed; falling back to kick + manual purge")
+
+        if not removed_ok:
+            # Fallback without ban permission: kick FIRST so no new messages
+            # arrive, then sweep history twice — the second pass catches
+            # messages the history endpoint returned late.
+            try:
+                await guild.kick(member, reason=reason)
+                removed_ok = True
+                removal_word = "kicked"
+            except Exception:
+                logging.exception("Honeypot: failed to kick")
+
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=delete_seconds)
+            total_deleted = 0
+
+            async def purge_channel(ch: discord.TextChannel) -> int:
+                try:
+                    me = guild.me or await guild.fetch_member(bot.user.id)
+                    perms = ch.permissions_for(me)
+                    if not (perms.read_message_history and perms.manage_messages):
+                        return 0
+                    deleted = await ch.purge(
+                        limit=None, after=cutoff,
+                        check=lambda m: m.author.id == member.id,
+                        bulk=True,
+                    )
+                    return len(deleted)
+                except Exception:
+                    return 0
+
+            for sweep in range(2):
+                if sweep:
+                    await asyncio.sleep(3)
+                for ch in guild.text_channels:
+                    total_deleted += await purge_channel(ch)
+            logging.info("Honeypot: %s %s; purged ~%d msgs.", removal_word if removed_ok else "FAILED to remove", member, total_deleted)
 
         try:
             mod_ch = None
@@ -983,10 +1012,14 @@ async def honeypot_guard(message: discord.Message) -> bool:
                 mod_ch = bot.get_channel(MOD_CHANNEL_ID) or await bot.fetch_channel(MOD_CHANNEL_ID)
             if mod_ch:
                 quip = await generate_mod_quip(member.display_name)
-                status = "kicked" if kicked_ok else "kick failed"
+                status = removal_word if removed_ok else "NOT removed (action failed)"
+                if total_deleted < 0:
+                    cleanup_line = f"🧹 Discord wiped their messages from the last {delete_seconds // 60} min."
+                else:
+                    cleanup_line = f"🧹 Deleted ~{total_deleted} message(s) from the last {delete_seconds // 60} min."
                 msg = (
                     f"👢 **{member.display_name}** was {status} (honeypot).\n"
-                    f"🧹 Deleted ~{total_deleted} message(s) from last 10 min.\n"
+                    f"{cleanup_line}\n"
                     f"{quip}"
                 )
                 await safe_send(mod_ch, msg)
