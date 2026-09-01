@@ -47,5 +47,7 @@
     ],
     "FrequencyPenalty": 0.3,
     "PresencePenalty": 0.3,
-    "EmptyReplyFallback": "I have nothing to say to that."
+    "EmptyReplyFallback": "I have nothing to say to that.",
+    "SDMaxConcurrent": 1,
+    "SDOfflineNotice": "The image engine is offline right now — try again later."
 }

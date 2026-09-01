@@ -247,11 +247,6 @@ def _too_similar(a: str, b: str, threshold: float = 0.9) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
 
-def _strip_token_ci(text: str, token: str) -> str:
-    pattern = rf"\b{re.escape(token)}\b:?"
-    return re.sub(pattern, "", text, flags=re.IGNORECASE)
-
-
 # =============================================================================
 # Rate Limiting
 # =============================================================================
@@ -270,16 +265,6 @@ class TokenBucket:
             self.tokens -= tokens
             return True
         return False
-
-
-# Per-channel bucket (existing behavior)
-_channel_buckets: dict[int, TokenBucket] = {}
-
-
-def get_channel_bucket(ch_id: int) -> TokenBucket:
-    if ch_id not in _channel_buckets:
-        _channel_buckets[ch_id] = TokenBucket(capacity=3, refill_rate=0.5)
-    return _channel_buckets[ch_id]
 
 
 # Per-user bucket: 5 images/minute = capacity 5, refill ~0.083/sec
@@ -597,6 +582,7 @@ class ImagePromptRecord:
     user_prompt: str
     final_sd_prompt: str
     negative_prompt: str = ""
+    seed: int = -1
     meta: dict[str, Any] = field(default_factory=dict)
     bot_message_id: int | None = None
     ts: float = 0.0
@@ -629,7 +615,12 @@ def image_ok(img: Image.Image | None) -> bool:
         return False
 
 
-async def stable_diffusion_generate_image(prompt: str) -> Image.Image | None:
+class SDOfflineError(Exception):
+    """The Stable Diffusion backend cannot be reached at all."""
+
+
+async def stable_diffusion_generate_image(prompt: str, seed: int = -1) -> tuple[Image.Image | None, int]:
+    """Generate an image. Returns (image, seed_used); seed -1 = random."""
     payload = {
         "prompt": config["SDPositivePrompt"] + prompt,
         "steps": config["SDSteps"],
@@ -638,6 +629,7 @@ async def stable_diffusion_generate_image(prompt: str) -> Image.Image | None:
         "cfg_scale": config["cfg_scale"],
         "negative_prompt": config["SDNegativePrompt"],
         "sampler_index": config["SDSampler"],
+        "seed": seed,
     }
     if config.get("scheduler"):
         payload["scheduler"] = config["scheduler"]
@@ -648,10 +640,32 @@ async def stable_diffusion_generate_image(prompt: str) -> Image.Image | None:
             async with s.post(config["SDURL"], json=payload) as r:
                 r.raise_for_status()
                 j = await r.json()
-                return Image.open(io.BytesIO(base64.b64decode(j["images"][0])))
+                img = Image.open(io.BytesIO(base64.b64decode(j["images"][0])))
+                used_seed = seed
+                try:
+                    used_seed = int(json.loads(j.get("info") or "{}").get("seed", seed))
+                except Exception:
+                    pass
+                return img, used_seed
+    except aiohttp.ClientConnectorError as e:
+        logging.warning("SD backend unreachable: %s", e)
+        raise SDOfflineError(str(e)) from e
     except Exception as e:
         logging.exception("SD generation failed: %s", e)
-        return None
+        return None, seed
+
+
+# One GPU — serialize generations ourselves so a queued request waits with
+# feedback instead of burning its HTTP timeout inside the SD backend.
+_sd_semaphore: asyncio.Semaphore | None = None
+_sd_waiting = 0
+
+
+def _get_sd_semaphore() -> asyncio.Semaphore:
+    global _sd_semaphore
+    if _sd_semaphore is None:
+        _sd_semaphore = asyncio.Semaphore(int(config.get("SDMaxConcurrent", 1)))
+    return _sd_semaphore
 
 
 # =============================================================================
@@ -722,7 +736,10 @@ async def refine_image_prompt(last: ImagePromptRecord, followup_text: str) -> di
 # =============================================================================
 # Heuristics
 # =============================================================================
-IMAGE_TRIGGERS = ("draw", "paint", "generate an image", "make a picture", "render", "sketch", "illustrate")
+_IMAGE_TRIGGER_RE = re.compile(
+    r"\b(draw|paint|sketch|illustrate|render|generate an image|make a picture)\b",
+    re.IGNORECASE,
+)
 EXACT_TRIGGERS = ("draw exact", "image exact", "img exact", "exact:")
 
 FOLLOWUP_STARTS = (
@@ -737,8 +754,8 @@ def is_exact_trigger(text: str) -> bool:
 
 
 def looks_like_image_request(text: str) -> bool:
-    t = (text or "").lower().strip()
-    return any(k in t for k in IMAGE_TRIGGERS) or t.startswith(("img:", "image:", "art:"))
+    t = (text or "").strip()
+    return bool(_IMAGE_TRIGGER_RE.search(t)) or t.lower().startswith(("img:", "image:", "art:"))
 
 
 def looks_like_followup(text: str) -> bool:
@@ -1108,14 +1125,12 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
 
 
 async def handle_image_message(message: discord.Message, text_override: str | None = None):
+    global _sd_waiting
     try:
         if not await ensure_can_send(message):
             return
         ch_id = channel_key(message)
 
-        if not get_channel_bucket(ch_id).consume():
-            await safe_send(message.channel, "I'm busy sketching — please wait.")
-            return
         if not get_user_bucket(message.author.id).consume():
             await safe_send(message.channel, "You're requesting images too fast — slow down a bit.")
             return
@@ -1124,31 +1139,51 @@ async def handle_image_message(message: discord.Message, text_override: str | No
         exact_mode = is_exact_trigger(text_in)
 
         raw = text_in
-        for tok in ("draw", "image", "img", "art"):
-            raw = _strip_token_ci(raw, tok)
         for phrase in EXACT_TRIGGERS:
-            raw = re.sub(re.escape(phrase), "", raw, flags=re.IGNORECASE)
+            raw = re.sub(re.escape(phrase), "", raw, count=1, flags=re.IGNORECASE)
+        # Strip only a LEADING trigger so words inside the prompt survive
+        # ("art nouveau", "a dragon drawing a sword").
+        raw = re.sub(r"^\s*(img|image|art)\s*:\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"^\s*(please\s+)?(draw|paint|sketch|illustrate|render)\b\s*(me\s+)?", "", raw, flags=re.IGNORECASE)
         if exact_mode:
-            raw = _strip_token_ci(raw, "exact")
+            raw = re.sub(r"^\s*exact\b:?\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s+", " ", raw).strip(" -:;,. \n\t")
 
+        seed = -1
         last = ipm.last_for_channel(ch_id)
-        if last and (looks_like_followup(text_in) or message.reference):
+        t_norm = re.sub(r"[\s!.…]+$", "", (text_in or "").strip().lower())
+        is_reroll = t_norm in {"again", "same", "same again", "again please", "reroll", "another", "another one", "one more"}
+        if last and is_reroll:
+            # Bare "again": same prompt, fresh random seed — a new take.
+            await safe_send(message.channel, "Rolling a fresh take on that…")
+            sd_prompt, neg = last.final_sd_prompt, last.negative_prompt
+        elif last and (looks_like_followup(text_in) or message.reference):
+            # A change request: keep the seed so the composition stays put
+            # and only the requested change lands.
             await safe_send(message.channel, config.get("ImageRefinementNotice", "Refining the previous image…"))
             refined = await refine_image_prompt(last, text_in)
             sd_prompt = refined.get("prompt", last.final_sd_prompt)
             neg = refined.get("negative", last.negative_prompt)
+            seed = last.seed
         else:
             await safe_send(message.channel, "Hang on while I sketch that for you…")
-            if exact_mode:
-                sd_prompt = raw
-                neg = config.get("SDNegativePrompt", "(lowres, blurry, deformed)")
-            else:
-                sd_prompt = await compile_sd_prompt(raw)
-                neg = config.get("SDNegativePrompt", "(lowres, blurry, deformed)")
+            neg = config.get("SDNegativePrompt", "(lowres, blurry, deformed)")
+            sd_prompt = raw if exact_mode else await compile_sd_prompt(raw)
 
-        async with message.channel.typing():
-            img = await stable_diffusion_generate_image(sd_prompt)
+        sem = _get_sd_semaphore()
+        queued = sem.locked()
+        if queued:
+            _sd_waiting += 1
+            await safe_send(message.channel, f"🎨 The easel is busy — you're #{_sd_waiting} in line.")
+        try:
+            async with sem:
+                if queued:
+                    _sd_waiting = max(0, _sd_waiting - 1)
+                async with message.channel.typing():
+                    img, seed = await stable_diffusion_generate_image(sd_prompt, seed=seed)
+        except SDOfflineError:
+            await safe_send(message.channel, config.get("SDOfflineNotice", "The image engine is offline right now — try again later."))
+            return
 
         if not image_ok(img):
             await safe_send(message.channel, "I couldn't render that image — try tweaking the description.")
@@ -1173,6 +1208,7 @@ async def handle_image_message(message: discord.Message, text_override: str | No
             user_prompt=text_in,
             final_sd_prompt=sd_prompt,
             negative_prompt=neg,
+            seed=seed,
             meta={"by": str(message.author)},
             bot_message_id=getattr(sent, "id", None),
             ts=time.time(),
