@@ -178,6 +178,7 @@ async def on_ready():
     logging.info("RUNNING FILE: %s | PID: %s", __file__, os.getpid())
     if not _background_tasks_started:
         _background_tasks_started = True
+        bot.add_view(ImageActionsView())  # persistent buttons survive restarts
         bot.loop.create_task(_periodic_save_loop())
         bot.loop.create_task(_daily_summary_scheduler())
         bot.loop.create_task(_config_watch_loop())
@@ -563,6 +564,7 @@ async def _periodic_save_loop():
         await asyncio.sleep(30)
         try:
             cm.save_if_dirty()
+            ipm.save_if_dirty()
         except Exception:
             logging.exception("Periodic save failed")
 
@@ -583,24 +585,81 @@ class ImagePromptRecord:
     final_sd_prompt: str
     negative_prompt: str = ""
     seed: int = -1
+    width: int = 0
+    height: int = 0
+    positive_prefix: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
     bot_message_id: int | None = None
     ts: float = 0.0
 
 
 class ImagePromptMemory:
-    def __init__(self):
+    """Per-channel image history, persisted so follow-ups and buttons survive restarts."""
+
+    def __init__(self, path: str | None = None, max_per_channel: int = 20):
         self.by_channel: dict[int, list[ImagePromptRecord]] = {}
+        self.path = path
+        self.max_per_channel = max_per_channel
+        self._dirty = False
+        self._load()
 
     def add(self, rec: ImagePromptRecord):
-        self.by_channel.setdefault(rec.channel_id, []).append(rec)
+        arr = self.by_channel.setdefault(rec.channel_id, [])
+        arr.append(rec)
+        del arr[:-self.max_per_channel]
+        self._dirty = True
 
     def last_for_channel(self, channel_id: int) -> ImagePromptRecord | None:
         arr = self.by_channel.get(channel_id, [])
         return arr[-1] if arr else None
 
+    def find_by_message(self, message_id: int | None) -> ImagePromptRecord | None:
+        if not message_id:
+            return None
+        for arr in self.by_channel.values():
+            for rec in reversed(arr):
+                if rec.bot_message_id == message_id:
+                    return rec
+        return None
 
-ipm = ImagePromptMemory()
+    def save_if_dirty(self):
+        if not self._dirty or not self.path:
+            return
+        try:
+            data = {str(ch): [rec.__dict__ for rec in arr] for ch, arr in self.by_channel.items() if arr}
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, self.path)
+            self._dirty = False
+        except Exception:
+            logging.exception("Failed to save image memory to %s", self.path)
+
+    def force_save(self):
+        self._dirty = True
+        self.save_if_dirty()
+
+    def _load(self):
+        if not self.path or not os.path.exists(self.path):
+            return
+        known = set(ImagePromptRecord.__dataclass_fields__)
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for ch, arr in data.items():
+                self.by_channel[int(ch)] = [
+                    ImagePromptRecord(**{k: v for k, v in d.items() if k in known}) for d in arr
+                ]
+            logging.info("Loaded image memory for %d channels", len(self.by_channel))
+        except Exception:
+            logging.exception("Failed to load image memory from %s", self.path)
+
+
+ipm = ImagePromptMemory(path=config.get("ImageMemoryPath", "image_memory.json"))
+
+# Latest generated image per channel (base64 PNG) for img2img refinements.
+# In-memory only — after a restart, refinements fall back to seed reuse.
+_last_image_b64: dict[int, str] = {}
 
 # =============================================================================
 # Image Generation (Stable Diffusion)
@@ -619,40 +678,99 @@ class SDOfflineError(Exception):
     """The Stable Diffusion backend cannot be reached at all."""
 
 
-async def stable_diffusion_generate_image(prompt: str, seed: int = -1) -> tuple[Image.Image | None, int]:
-    """Generate an image. Returns (image, seed_used); seed -1 = random."""
-    payload = {
-        "prompt": config["SDPositivePrompt"] + prompt,
-        "steps": config["SDSteps"],
-        "width": config["SDWidth"],
-        "height": config["SDHeight"],
-        "cfg_scale": config["cfg_scale"],
-        "negative_prompt": config["SDNegativePrompt"],
-        "sampler_index": config["SDSampler"],
-        "seed": seed,
-    }
-    if config.get("scheduler"):
-        payload["scheduler"] = config["scheduler"]
+def _sd_base_url() -> str:
+    return config["SDURL"].split("/sdapi/")[0]
 
-    timeout = aiohttp.ClientTimeout(total=120)
+
+async def _sd_post(path: str, payload: dict) -> dict:
+    timeout = aiohttp.ClientTimeout(total=int(config.get("SDTimeout", 180)))
     try:
         async with aiohttp.ClientSession(timeout=timeout) as s:
-            async with s.post(config["SDURL"], json=payload) as r:
+            async with s.post(_sd_base_url() + path, json=payload) as r:
                 r.raise_for_status()
-                j = await r.json()
-                img = Image.open(io.BytesIO(base64.b64decode(j["images"][0])))
-                used_seed = seed
-                try:
-                    used_seed = int(json.loads(j.get("info") or "{}").get("seed", seed))
-                except Exception:
-                    pass
-                return img, used_seed
+                return await r.json()
     except aiohttp.ClientConnectorError as e:
         logging.warning("SD backend unreachable: %s", e)
         raise SDOfflineError(str(e)) from e
+
+
+async def _sd_get(path: str) -> dict | None:
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+            async with s.get(_sd_base_url() + path) as r:
+                r.raise_for_status()
+                return await r.json()
+    except Exception:
+        return None
+
+
+async def sd_generate(
+    *,
+    prompt: str,
+    negative: str,
+    seed: int = -1,
+    subseed_strength: float = 0.0,
+    hires: bool = False,
+    batch: int = 1,
+    width: int | None = None,
+    height: int | None = None,
+    positive_prefix: str | None = None,
+    init_image_b64: str | None = None,
+) -> tuple[list[Image.Image], int, str | None]:
+    """txt2img, or img2img when an init image is given.
+
+    Returns (images, seed_used, first_image_b64)."""
+    prefix = positive_prefix if positive_prefix is not None else config["SDPositivePrompt"]
+    batch = max(1, min(int(config.get("SDMaxBatch", 4)), batch))
+    payload = {
+        "prompt": prefix + prompt,
+        "negative_prompt": negative,
+        "steps": config["SDSteps"],
+        "width": width or config["SDWidth"],
+        "height": height or config["SDHeight"],
+        "cfg_scale": config["cfg_scale"],
+        "sampler_index": config["SDSampler"],
+        "seed": seed,
+        "batch_size": batch,
+    }
+    if config.get("scheduler"):
+        payload["scheduler"] = config["scheduler"]
+    if subseed_strength > 0:
+        payload["subseed"] = -1
+        payload["subseed_strength"] = subseed_strength
+
+    endpoint = "/sdapi/v1/txt2img"
+    if init_image_b64:
+        endpoint = "/sdapi/v1/img2img"
+        payload["init_images"] = [init_image_b64]
+        payload["denoising_strength"] = float(config.get("SDImg2ImgDenoise", 0.5))
+    elif hires:
+        payload["enable_hr"] = True
+        payload["hr_scale"] = float(config.get("SDUpscaleFactor", 2.0))
+        payload["hr_upscaler"] = config.get("SDHiresUpscaler", "Latent")
+        payload["denoising_strength"] = 0.4
+
+    try:
+        j = await _sd_post(endpoint, payload)
+    except SDOfflineError:
+        raise
     except Exception as e:
         logging.exception("SD generation failed: %s", e)
-        return None, seed
+        return [], seed, None
+
+    raw_images = (j.get("images") or [])[:batch]
+    images: list[Image.Image] = []
+    for b in raw_images:
+        try:
+            images.append(Image.open(io.BytesIO(base64.b64decode(b))))
+        except Exception:
+            logging.exception("Failed to decode SD image")
+    used_seed = seed
+    try:
+        used_seed = int(json.loads(j.get("info") or "{}").get("seed", seed))
+    except Exception:
+        pass
+    return images, used_seed, (raw_images[0] if raw_images else None)
 
 
 # One GPU — serialize generations ourselves so a queued request waits with
@@ -666,6 +784,189 @@ def _get_sd_semaphore() -> asyncio.Semaphore:
     if _sd_semaphore is None:
         _sd_semaphore = asyncio.Semaphore(int(config.get("SDMaxConcurrent", 1)))
     return _sd_semaphore
+
+
+async def _progress_updates(status_msg, gen_task: asyncio.Task):
+    """Edit the status message with live progress while a generation runs."""
+    if status_msg is None:
+        return
+    try:
+        while not gen_task.done():
+            await asyncio.sleep(4)
+            if gen_task.done():
+                return
+            j = await _sd_get("/sdapi/v1/progress?skip_current_image=true")
+            if not j:
+                continue
+            pct = int(float(j.get("progress") or 0) * 100)
+            if pct <= 0:
+                continue
+            eta = int(float(j.get("eta_relative") or 0))
+            text = f"🎨 {pct}%" + (f" · ~{eta}s left" if eta > 0 else "")
+            try:
+                await status_msg.edit(content=text)
+            except Exception:
+                return
+    except asyncio.CancelledError:
+        return
+
+
+class ImageActionsView(discord.ui.View):
+    """Persistent buttons attached to every generated image."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Redo", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="imggen:redo")
+    async def redo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _image_button(interaction, "redo")
+
+    @discord.ui.button(label="Variation", emoji="✨", style=discord.ButtonStyle.secondary, custom_id="imggen:vary")
+    async def vary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _image_button(interaction, "vary")
+
+    @discord.ui.button(label="Upscale", emoji="⬆️", style=discord.ButtonStyle.secondary, custom_id="imggen:upscale")
+    async def upscale(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _image_button(interaction, "upscale")
+
+    @discord.ui.button(label="Prompt", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="imggen:prompt")
+    async def prompt(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _image_button(interaction, "prompt")
+
+
+async def _image_button(interaction: discord.Interaction, action: str):
+    try:
+        rec = ipm.find_by_message(interaction.message.id if interaction.message else None)
+        if rec is None:
+            await interaction.response.send_message("I no longer remember this image, sorry.", ephemeral=True)
+            return
+
+        if action == "prompt":
+            text = (
+                f"**Prompt:**\n```{(rec.final_sd_prompt or '')[:1700]}```\n"
+                f"**Negative:** {(rec.negative_prompt or '')[:300]}\n"
+                f"**Seed:** `{rec.seed}`"
+            )
+            await interaction.response.send_message(text, ephemeral=True)
+            return
+
+        if not get_user_bucket(interaction.user.id).consume():
+            await interaction.response.send_message("You're requesting images too fast — slow down a bit.", ephemeral=True)
+            return
+
+        labels = {"redo": "Rolling a fresh take…", "vary": "Painting a variation…", "upscale": "Upscaling…"}
+        await interaction.response.send_message(f"🎨 {labels.get(action, 'Working…')}")
+        status_msg = await interaction.original_response()
+
+        kwargs: dict[str, Any] = dict(
+            ch_id=rec.channel_id,
+            user_prompt=rec.user_prompt,
+            sd_prompt=rec.final_sd_prompt,
+            neg=rec.negative_prompt,
+            positive_prefix=rec.positive_prefix or None,
+            width=rec.width or None,
+            height=rec.height or None,
+            requested_by=interaction.user.display_name,
+            status_msg=status_msg,
+        )
+        if action == "vary":
+            kwargs.update(seed=rec.seed, subseed_strength=float(config.get("SDVariationStrength", 0.35)))
+        elif action == "upscale":
+            kwargs.update(seed=rec.seed, hires=True)
+        asyncio.create_task(run_image_job(interaction.channel, **kwargs))
+    except Exception:
+        logging.exception("Image button %s failed", action)
+
+
+async def run_image_job(
+    channel,
+    *,
+    ch_id: int,
+    user_prompt: str,
+    sd_prompt: str,
+    neg: str,
+    seed: int = -1,
+    subseed_strength: float = 0.0,
+    hires: bool = False,
+    batch: int = 1,
+    width: int | None = None,
+    height: int | None = None,
+    positive_prefix: str | None = None,
+    init_image_b64: str | None = None,
+    requested_by: str = "",
+    trigger_message_id: int = 0,
+    status_msg=None,
+):
+    """Queue a generation, show progress, deliver the result with action buttons."""
+    global _sd_waiting
+    try:
+        sem = _get_sd_semaphore()
+        queued = sem.locked()
+        if queued:
+            _sd_waiting += 1
+            await safe_send(channel, f"🎨 The easel is busy — you're #{_sd_waiting} in line.")
+        try:
+            async with sem:
+                if queued:
+                    _sd_waiting = max(0, _sd_waiting - 1)
+                async with channel.typing():
+                    gen_task = asyncio.create_task(sd_generate(
+                        prompt=sd_prompt, negative=neg, seed=seed,
+                        subseed_strength=subseed_strength, hires=hires, batch=batch,
+                        width=width, height=height, positive_prefix=positive_prefix,
+                        init_image_b64=init_image_b64,
+                    ))
+                    progress_task = asyncio.create_task(_progress_updates(status_msg, gen_task))
+                    try:
+                        images, seed_used, first_b64 = await gen_task
+                    finally:
+                        progress_task.cancel()
+        except SDOfflineError:
+            await safe_send(channel, config.get("SDOfflineNotice", "The image engine is offline right now — try again later."))
+            return
+
+        images = [im for im in images if image_ok(im)]
+        if not images:
+            await safe_send(channel, "I couldn't render that image — try tweaking the description.")
+            return
+
+        files = []
+        for i, img in enumerate(images):
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            files.append(discord.File(buf, filename=f"output_{i + 1}.png"))
+
+        content = f"🎨 for **{requested_by}** — use the buttons to iterate." if requested_by else None
+        sent = await safe_send(channel, content, files=files, view=ImageActionsView())
+
+        if status_msg is not None:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+        if first_b64:
+            _last_image_b64[ch_id] = first_b64
+        ipm.add(ImagePromptRecord(
+            channel_id=ch_id,
+            message_id=trigger_message_id,
+            user_prompt=user_prompt,
+            final_sd_prompt=sd_prompt,
+            negative_prompt=neg,
+            seed=seed_used,
+            width=width or 0,
+            height=height or 0,
+            positive_prefix=positive_prefix or "",
+            meta={"by": requested_by},
+            bot_message_id=getattr(sent, "id", None),
+            ts=time.time(),
+        ))
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logging.exception("Image job failed")
+        await safe_send(channel, "Oops — image generation hit a snag.")
 
 
 # =============================================================================
@@ -758,25 +1059,29 @@ def looks_like_image_request(text: str) -> bool:
     return bool(_IMAGE_TRIGGER_RE.search(t)) or t.lower().startswith(("img:", "image:", "art:"))
 
 
+def _looks_like_tag_prompt(text: str) -> bool:
+    """Comma-heavy tag lists are already SD-ready — skip the LLM rewrite."""
+    if not config.get("SkipRewriteForTagPrompts", True):
+        return False
+    return (text or "").count(",") >= 5
+
+
 def looks_like_followup(text: str) -> bool:
     t = (text or "").lower().strip()
     return any(t.startswith(s) for s in FOLLOWUP_STARTS)
 
 
 def should_route_to_image_followup(message: discord.Message) -> bool:
-    ch_id = channel_key(message)
-    last = ipm.last_for_channel(ch_id)
+    # Replying to ANY of the bot's images routes to refinement of that image.
+    if message.reference and ipm.find_by_message(message.reference.message_id):
+        return True
+    last = ipm.last_for_channel(channel_key(message))
     if not last:
         return False
-    if message.reference and last.bot_message_id:
-        try:
-            if message.reference.message_id == last.bot_message_id:
-                return True
-        except Exception:
-            pass
     if not looks_like_followup(message.content or ""):
         return False
-    if last.ts <= 0 or (time.time() - last.ts > 120):
+    window = int(config.get("ImageFollowupWindowSec", 600))
+    if last.ts <= 0 or (time.time() - last.ts > window):
         return False
     return True
 
@@ -1125,7 +1430,6 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
 
 
 async def handle_image_message(message: discord.Message, text_override: str | None = None):
-    global _sd_waiting
     try:
         if not await ensure_can_send(message):
             return
@@ -1149,70 +1453,81 @@ async def handle_image_message(message: discord.Message, text_override: str | No
             raw = re.sub(r"^\s*exact\b:?\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s+", " ", raw).strip(" -:;,. \n\t")
 
-        seed = -1
-        last = ipm.last_for_channel(ch_id)
+        # --- lightweight parameters parsed from the request ---
+        width = height = None
+        if re.search(r"\b(portrait|tall)\b", raw, re.IGNORECASE):
+            size = config.get("SDPortraitSize") or []
+            if len(size) == 2:
+                width, height = int(size[0]), int(size[1])
+        elif re.search(r"\b(landscape|wide)\b", raw, re.IGNORECASE):
+            size = config.get("SDLandscapeSize") or []
+            if len(size) == 2:
+                width, height = int(size[0]), int(size[1])
+
+        batch = 1
+        m = re.search(r"\b([2-9])x\b|\bx([2-9])\b", raw)
+        if m:
+            batch = int(m.group(1) or m.group(2))
+            raw = (raw[:m.start()] + raw[m.end():]).strip()
+
+        positive_prefix = None
+        preset_neg = None
+        presets = config.get("SDStylePresets") or {}
+        m = re.search(r"\bstyle:\s*(\w+)\b", raw, re.IGNORECASE)
+        if m:
+            preset = next((v for k, v in presets.items() if k.lower() == m.group(1).lower()), None)
+            if preset:
+                positive_prefix = preset.get("positive", "")
+                preset_neg = preset.get("negative")
+                raw = (raw[:m.start()] + raw[m.end():]).strip()
+
+        neg = preset_neg or config.get("SDNegativePrompt", "(lowres, blurry, deformed)")
+
+        ref_rec = ipm.find_by_message(message.reference.message_id if message.reference else None)
+        base = ref_rec or ipm.last_for_channel(ch_id)
         t_norm = re.sub(r"[\s!.…]+$", "", (text_in or "").strip().lower())
         is_reroll = t_norm in {"again", "same", "same again", "again please", "reroll", "another", "another one", "one more"}
-        if last and is_reroll:
+
+        seed = -1
+        init_b64 = None
+        if base and is_reroll:
             # Bare "again": same prompt, fresh random seed — a new take.
-            await safe_send(message.channel, "Rolling a fresh take on that…")
-            sd_prompt, neg = last.final_sd_prompt, last.negative_prompt
-        elif last and (looks_like_followup(text_in) or message.reference):
-            # A change request: keep the seed so the composition stays put
-            # and only the requested change lands.
-            await safe_send(message.channel, config.get("ImageRefinementNotice", "Refining the previous image…"))
-            refined = await refine_image_prompt(last, text_in)
-            sd_prompt = refined.get("prompt", last.final_sd_prompt)
-            neg = refined.get("negative", last.negative_prompt)
-            seed = last.seed
+            status_msg = await safe_send(message.channel, "Rolling a fresh take on that…")
+            sd_prompt, neg = base.final_sd_prompt, base.negative_prompt
+            positive_prefix = base.positive_prefix or None
+            width, height = base.width or None, base.height or None
+        elif base and (looks_like_followup(text_in) or ref_rec):
+            # A change request: refine the prompt, keep the seed, and — when we
+            # still hold the source image — run img2img so the composition stays put.
+            status_msg = await safe_send(message.channel, config.get("ImageRefinementNotice", "Refining the previous image…"))
+            refined = await refine_image_prompt(base, text_in)
+            sd_prompt = refined.get("prompt", base.final_sd_prompt)
+            neg = refined.get("negative", base.negative_prompt)
+            seed = base.seed
+            positive_prefix = base.positive_prefix or None
+            width, height = base.width or None, base.height or None
+            if base is ipm.last_for_channel(ch_id):
+                init_b64 = _last_image_b64.get(ch_id)
         else:
-            await safe_send(message.channel, "Hang on while I sketch that for you…")
-            neg = config.get("SDNegativePrompt", "(lowres, blurry, deformed)")
-            sd_prompt = raw if exact_mode else await compile_sd_prompt(raw)
+            status_msg = await safe_send(message.channel, "Hang on while I sketch that for you…")
+            sd_prompt = raw if (exact_mode or _looks_like_tag_prompt(raw)) else await compile_sd_prompt(raw)
 
-        sem = _get_sd_semaphore()
-        queued = sem.locked()
-        if queued:
-            _sd_waiting += 1
-            await safe_send(message.channel, f"🎨 The easel is busy — you're #{_sd_waiting} in line.")
-        try:
-            async with sem:
-                if queued:
-                    _sd_waiting = max(0, _sd_waiting - 1)
-                async with message.channel.typing():
-                    img, seed = await stable_diffusion_generate_image(sd_prompt, seed=seed)
-        except SDOfflineError:
-            await safe_send(message.channel, config.get("SDOfflineNotice", "The image engine is offline right now — try again later."))
-            return
-
-        if not image_ok(img):
-            await safe_send(message.channel, "I couldn't render that image — try tweaking the description.")
-            return
-
-        image_bytes = io.BytesIO()
-        img.save(image_bytes, format="PNG")
-        image_bytes.seek(0)
-
-        files = [discord.File(image_bytes, filename="output.png")]
-        content = sd_prompt
-        if len(sd_prompt) > 1800:
-            prompt_bytes = io.BytesIO(sd_prompt.encode("utf-8"))
-            files.append(discord.File(prompt_bytes, filename="prompt.txt"))
-            content = "Rendered image. Full prompt attached as prompt.txt"
-
-        sent = await safe_send(message.channel, content, files=files)
-
-        ipm.add(ImagePromptRecord(
-            channel_id=ch_id,
-            message_id=message.id,
+        await run_image_job(
+            message.channel,
+            ch_id=ch_id,
             user_prompt=text_in,
-            final_sd_prompt=sd_prompt,
-            negative_prompt=neg,
+            sd_prompt=sd_prompt,
+            neg=neg,
             seed=seed,
-            meta={"by": str(message.author)},
-            bot_message_id=getattr(sent, "id", None),
-            ts=time.time(),
-        ))
+            batch=batch,
+            width=width,
+            height=height,
+            positive_prefix=positive_prefix,
+            init_image_b64=init_b64,
+            requested_by=message.author.display_name,
+            trigger_message_id=message.id,
+            status_msg=status_msg,
+        )
     except asyncio.CancelledError:
         return
     except Exception:
@@ -1796,6 +2111,7 @@ def _setup_signal_handlers():
     def _handle_shutdown(sig):
         logging.info("Received %s — flushing state…", sig.name)
         cm.force_save()
+        ipm.force_save()
         logging.info("State flushed. Closing bot.")
         loop.create_task(bot.close())
 

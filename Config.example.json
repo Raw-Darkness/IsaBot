@@ -49,5 +49,28 @@
     "PresencePenalty": 0.3,
     "EmptyReplyFallback": "I have nothing to say to that.",
     "SDMaxConcurrent": 1,
-    "SDOfflineNotice": "The image engine is offline right now — try again later."
+    "SDOfflineNotice": "The image engine is offline right now — try again later.",
+    "SDTimeout": 180,
+    "SDMaxBatch": 4,
+    "SDVariationStrength": 0.35,
+    "SDUpscaleFactor": 2.0,
+    "SDHiresUpscaler": "Latent",
+    "SDImg2ImgDenoise": 0.5,
+    "SkipRewriteForTagPrompts": true,
+    "ImageFollowupWindowSec": 600,
+    "SDPortraitSize": [
+        832,
+        1216
+    ],
+    "SDLandscapeSize": [
+        1216,
+        832
+    ],
+    "ImageMemoryPath": "image_memory.json",
+    "SDStylePresets": {
+        "anime": {
+            "positive": "masterpiece, best quality, anime style, ",
+            "negative": "photorealistic, 3d render"
+        }
+    }
 }

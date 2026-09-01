@@ -34,3 +34,4 @@ Bot/
 __pycache__/
 *.pyc
 .claude/
+image_memory.json
