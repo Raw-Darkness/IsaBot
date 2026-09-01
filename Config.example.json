@@ -75,5 +75,15 @@
     },
     "ModLogChannelID": 0,
     "DatabasePath": "isabot.db",
-    "EnableMembersIntent": false
+    "EnableMembersIntent": false,
+    "XPEnabled": true,
+    "XPPerMessageMin": 15,
+    "XPPerMessageMax": 25,
+    "XPCooldownSec": 60,
+    "XPExcludedChannels": [],
+    "XPAnnounceChannelID": 0,
+    "XPRoleRewards": {},
+    "LevelUpMessages": [
+        "🎉 **{name}** reached level **{level}**!"
+    ]
 }

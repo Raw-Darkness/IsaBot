@@ -1131,6 +1131,16 @@ def get_db() -> sqlite3.Connection:
             )"""
         )
         _db.execute("CREATE INDEX IF NOT EXISTS idx_user_records_user ON user_records(user_id)")
+        _db.execute(
+            """CREATE TABLE IF NOT EXISTS user_xp (
+                user_id INTEGER PRIMARY KEY,
+                name TEXT DEFAULT '',
+                xp INTEGER NOT NULL DEFAULT 0,
+                level INTEGER NOT NULL DEFAULT 0,
+                messages INTEGER NOT NULL DEFAULT 0,
+                last_award REAL NOT NULL DEFAULT 0
+            )"""
+        )
         _db.commit()
     return _db
 
@@ -1176,6 +1186,132 @@ def _parse_user_ref(arg: str) -> int | None:
     """Accept a raw user ID or a <@mention>."""
     m = re.match(r"^<@!?(\d+)>$", (arg or "").strip()) or re.match(r"^(\d+)$", (arg or "").strip())
     return int(m.group(1)) if m else None
+
+
+# =============================================================================
+# XP / Leveling
+# =============================================================================
+# MEE6-style: 15-25 XP per message with a per-user cooldown, so chatting
+# earns and spamming doesn't. Level N -> N+1 costs 5N² + 50N + 100 XP.
+def xp_needed_for(level: int) -> int:
+    return 5 * level * level + 50 * level + 100
+
+
+def level_progress(total_xp: int) -> tuple[int, int, int]:
+    """Returns (level, xp_into_level, xp_needed_for_next)."""
+    level = 0
+    remaining = int(total_xp)
+    while remaining >= xp_needed_for(level):
+        remaining -= xp_needed_for(level)
+        level += 1
+    return level, remaining, xp_needed_for(level)
+
+
+_DEFAULT_LEVELUP_MESSAGES = ["🎉 **{name}** reached level **{level}**!"]
+
+
+async def award_xp(message: discord.Message):
+    try:
+        if not config.get("XPEnabled", True):
+            return
+        if message.channel.id in set(config.get("XPExcludedChannels", [])):
+            return
+        now = time.time()
+        db = get_db()
+        row = db.execute(
+            "SELECT xp, level, last_award FROM user_xp WHERE user_id = ?", (message.author.id,)
+        ).fetchone()
+        if row and now - row[2] < int(config.get("XPCooldownSec", 60)):
+            return
+        gain = random.randint(int(config.get("XPPerMessageMin", 15)), int(config.get("XPPerMessageMax", 25)))
+        old_xp, old_level = (row[0], row[1]) if row else (0, 0)
+        new_xp = old_xp + gain
+        new_level, _, _ = level_progress(new_xp)
+        db.execute(
+            """INSERT INTO user_xp (user_id, name, xp, level, messages, last_award)
+               VALUES (?, ?, ?, ?, 1, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 name = excluded.name, xp = excluded.xp, level = excluded.level,
+                 messages = user_xp.messages + 1, last_award = excluded.last_award""",
+            (message.author.id, message.author.display_name, new_xp, new_level, now),
+        )
+        db.commit()
+        if new_level > old_level:
+            await _handle_level_up(message, new_level)
+    except Exception:
+        logging.exception("award_xp failed")
+
+
+async def _handle_level_up(message: discord.Message, new_level: int):
+    quips = config.get("LevelUpMessages") or _DEFAULT_LEVELUP_MESSAGES
+    try:
+        text = str(random.choice(quips)).format(name=message.author.display_name, level=new_level)
+    except Exception:
+        text = f"🎉 {message.author.display_name} reached level {new_level}!"
+    channel = message.channel
+    ann_id = int(config.get("XPAnnounceChannelID", 0))
+    if ann_id:
+        channel = bot.get_channel(ann_id) or channel
+    await safe_send(channel, text)
+
+    # Role rewards: grant every configured role at or below the new level.
+    rewards = config.get("XPRoleRewards") or {}
+    member = message.author
+    if message.guild and isinstance(member, discord.Member):
+        for lvl_str, role_id in rewards.items():
+            try:
+                if int(lvl_str) <= new_level:
+                    role = message.guild.get_role(int(role_id))
+                    if role and role not in member.roles:
+                        await member.add_roles(role, reason=f"Level {lvl_str} reward")
+            except Exception:
+                logging.exception("Failed to grant level reward role %r", role_id)
+
+
+async def handle_xp_command(message: discord.Message) -> bool:
+    """Public commands, usable by anyone anywhere: !rank / !level, !top / !leaderboard."""
+    text = (message.content or "").strip()
+    parts = text.split(None, 1)
+    if not parts:
+        return False
+    cmd = parts[0].lower()
+    if cmd not in ("!rank", "!level", "!top", "!leaderboard"):
+        return False
+    if not config.get("XPEnabled", True):
+        return False
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    db = get_db()
+
+    if cmd in ("!rank", "!level"):
+        target = _parse_user_ref(arg) if arg else message.author.id
+        if not target:
+            target = message.author.id
+        row = db.execute("SELECT name, xp, messages FROM user_xp WHERE user_id = ?", (target,)).fetchone()
+        if not row:
+            who = "You haven't" if target == message.author.id else "They haven't"
+            await safe_send(message.channel, f"{who} earned any XP yet — join the conversation!")
+            return True
+        name, xp, msgs = row
+        level, progress, needed = level_progress(xp)
+        rank = db.execute("SELECT COUNT(*) + 1 FROM user_xp WHERE xp > ?", (xp,)).fetchone()[0]
+        await safe_send(
+            message.channel,
+            f"**{name}** — Level **{level}** · Rank **#{rank}**\n"
+            f"XP: {xp} ({progress}/{needed} into the next level) · Messages counted: {msgs}",
+        )
+        return True
+
+    rows = db.execute("SELECT name, level, xp FROM user_xp ORDER BY xp DESC LIMIT 10").fetchall()
+    if not rows:
+        await safe_send(message.channel, "The leaderboard is empty — someone say something!")
+        return True
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["**🏆 Leaderboard**"]
+    for i, (name, level, xp) in enumerate(rows):
+        tag = medals[i] if i < 3 else f"`#{i + 1}`"
+        lines.append(f"{tag} **{name}** — Level {level} · {xp:,} XP")
+    await safe_send(message.channel, "\n".join(lines))
+    return True
 
 
 # =============================================================================
@@ -1554,37 +1690,6 @@ async def on_member_unban(guild: discord.Guild, user):
         await _modlog_send(embed)
     except Exception:
         logging.exception("on_member_unban failed")
-
-
-# The two below only fire when the Server Members intent is enabled
-# (EnableMembersIntent in config + the toggle in the developer portal).
-@bot.event
-async def on_member_join(member: discord.Member):
-    try:
-        age = datetime.now(timezone.utc) - member.created_at
-        embed = discord.Embed(title="Member joined", color=0x2ECC71)
-        embed.add_field(name="User", value=f"{member} ({member.id})")
-        embed.add_field(name="Account created", value=f"<t:{int(member.created_at.timestamp())}:R>")
-        if age < timedelta(hours=24):
-            embed.description = "⚠️ **New account** (less than 24h old)"
-            embed.color = 0xE67E22
-        await _modlog_send(embed)
-    except Exception:
-        logging.exception("on_member_join failed")
-
-
-@bot.event
-async def on_member_remove(member: discord.Member):
-    try:
-        roles = ", ".join(r.name for r in member.roles if r.name != "@everyone") or "None"
-        embed = discord.Embed(title="Member left", color=0x95A5A6)
-        embed.add_field(name="User", value=f"{member} ({member.id})")
-        if member.joined_at:
-            embed.add_field(name="Joined", value=f"<t:{int(member.joined_at.timestamp())}:R>")
-        embed.add_field(name="Roles", value=_trunc(roles, 300), inline=False)
-        await _modlog_send(embed)
-    except Exception:
-        logging.exception("on_member_remove failed")
 
 
 # =============================================================================
@@ -2130,6 +2235,17 @@ async def on_message(message: discord.Message):
                 return
         except Exception:
             logging.exception("Bot command error")
+
+    # XP commands — public, anyone, any channel (and DMs)
+    try:
+        if await handle_xp_command(message):
+            return
+    except Exception:
+        logging.exception("XP command error")
+
+    # Passive XP for guild chatter (commands excluded)
+    if message.guild and not (message.content or "").startswith("!"):
+        asyncio.create_task(award_xp(message))
 
     try:
         ch_id = channel_key(message)
