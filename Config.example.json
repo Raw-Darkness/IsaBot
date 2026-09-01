@@ -88,5 +88,6 @@
     ],
     "XPTierMessages": {},
     "XPStarLevel": 0,
-    "XPStarPortraitPrompt": ""
+    "XPStarPortraitPrompt": "",
+    "XPAnnounceRanksOnly": false
 }

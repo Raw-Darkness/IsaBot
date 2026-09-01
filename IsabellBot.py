@@ -1247,6 +1247,10 @@ async def _handle_level_up(message: discord.Message, old_level: int, new_level: 
     crossed = [lvl for lvl in sorted(rewards) if old_level < lvl <= new_level]
     reached_tier = crossed[-1] if crossed else None
 
+    # With XPAnnounceRanksOnly, ordinary level-ups (no rank crossed) are silent.
+    if reached_tier is None and config.get("XPAnnounceRanksOnly"):
+        return
+
     # Announcement: tier-specific line when a rank was just reached, else generic.
     template = None
     if reached_tier is not None:
