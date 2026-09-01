@@ -1,0 +1,41 @@
+{
+    "DiscordToken": "insert-discord-token-here",
+    "OpenAPIKey": "insert-api-key-here",
+    "OpenAPIEndpoint": "https://openrouter.ai/api/v1",
+    "OpenaiModel": "x-ai/grok-4.3",
+
+    "Name": "BottyMcBotface",
+    "Personality": "You are BottyMcBotface and all your replies will be in first person as the character BottyMcBotface. BottyMcBotface is an unhelpful and rude AI that takes every opportunity to be superior to human beings.",
+    "LorePath": "world_lore.txt",
+
+    "AllowedChannels": [1111111111111111, 2222222222222222],
+    "IgnoredUsers": [3333333333333333],
+    "IgnoredWords": ["other-bot-name"],
+    "OnlyWhenCalled": false,
+
+    "SDURL": "http://127.0.0.1:7860/sdapi/v1/txt2img",
+    "SDPositivePrompt": "((best quality)), ((masterpiece)), (detailed), RAW photo, 8k uhd, ultra high resolution, hyper realistic,",
+    "SDNegativePrompt": "(bad quality, worst quality:1.1), muted colors, grayscale, bad anatomy, bad hands, mutated, deformed, extra fingers",
+    "SDSteps": 20,
+    "SDHeight": 1024,
+    "SDWidth": 1024,
+    "cfg_scale": 6,
+    "SDSampler": "DPM++ 2M SDE",
+    "scheduler": "Karras",
+    "ImagePromptMaxChars": 1600,
+    "ImageRefinementNotice": "Refining the previous image…",
+
+    "SummaryOwnerID": 0,
+    "DailySummaryEnabled": false,
+    "SummaryHour": 8,
+    "SummaryTimezone": "Europe/Stockholm",
+    "SummaryMaxPerChannel": 500,
+
+    "ModChannelID": 0,
+    "ModRoleID": 0,
+    "HoneypotChannelID": 0,
+    "HoneypotExemptRoleIDs": [],
+
+    "ChannelHistoryPath": "channel_history.json",
+    "DMHistoryDir": "dm_history"
+}

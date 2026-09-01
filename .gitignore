@@ -1,0 +1,36 @@
+# ==== real config & secrets — never commit ====
+Config.json
+Isabell.json
+Aeron.json
+OPENROUTER_API_KEY
+.env
+
+# ==== runtime state & user data ====
+app.log*
+channel_history.json
+dm_history/
+.summary_last_run
+
+# ==== server-specific content ====
+world_lore.txt
+world_lore.json
+IsabellPersonality.txt
+
+# ==== legacy / local-only files ====
+AeronBot.py
+IsabellBot-prerefactor.py
+IsabellBot - Copy.py
+archivedCode.py
+testcall.py
+comfy_socket.py
+workflow_api.py
+workflow_api.json
+Workflow_API2.json
+DefaultWorkdflow_API.json
+Bot/
+*Zone.Identifier*
+
+# ==== python ====
+__pycache__/
+*.pyc
+.claude/
