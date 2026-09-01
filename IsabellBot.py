@@ -1237,15 +1237,24 @@ async def award_xp(message: discord.Message):
         )
         db.commit()
         if new_level > old_level:
-            await _handle_level_up(message, new_level)
+            await _handle_level_up(message, old_level, new_level)
     except Exception:
         logging.exception("award_xp failed")
 
 
-async def _handle_level_up(message: discord.Message, new_level: int):
-    quips = config.get("LevelUpMessages") or _DEFAULT_LEVELUP_MESSAGES
+async def _handle_level_up(message: discord.Message, old_level: int, new_level: int):
+    rewards = {int(k): int(v) for k, v in (config.get("XPRoleRewards") or {}).items()}
+    crossed = [lvl for lvl in sorted(rewards) if old_level < lvl <= new_level]
+    reached_tier = crossed[-1] if crossed else None
+
+    # Announcement: tier-specific line when a rank was just reached, else generic.
+    template = None
+    if reached_tier is not None:
+        template = (config.get("XPTierMessages") or {}).get(str(reached_tier))
+    if not template:
+        template = str(random.choice(config.get("LevelUpMessages") or _DEFAULT_LEVELUP_MESSAGES))
     try:
-        text = str(random.choice(quips)).format(name=message.author.display_name, level=new_level)
+        text = template.format(name=message.author.display_name, level=new_level)
     except Exception:
         text = f"🎉 {message.author.display_name} reached level {new_level}!"
     channel = message.channel
@@ -1254,18 +1263,39 @@ async def _handle_level_up(message: discord.Message, new_level: int):
         channel = bot.get_channel(ann_id) or channel
     await safe_send(channel, text)
 
-    # Role rewards: grant every configured role at or below the new level.
-    rewards = config.get("XPRoleRewards") or {}
+    # Rank roles: promotion is a SWAP — grant the highest earned rank and drop
+    # lower ranks, so each member wears exactly one. Roles for tiers ABOVE the
+    # earned one are never touched (protects manually-granted top roles).
     member = message.author
-    if message.guild and isinstance(member, discord.Member):
-        for lvl_str, role_id in rewards.items():
+    if message.guild and isinstance(member, discord.Member) and rewards:
+        earned = [lvl for lvl in sorted(rewards) if lvl <= new_level]
+        if earned:
             try:
-                if int(lvl_str) <= new_level:
-                    role = message.guild.get_role(int(role_id))
-                    if role and role not in member.roles:
-                        await member.add_roles(role, reason=f"Level {lvl_str} reward")
+                keep_id = rewards[earned[-1]]
+                to_add = message.guild.get_role(keep_id)
+                if to_add and to_add not in member.roles:
+                    await member.add_roles(to_add, reason=f"Level {earned[-1]} rank")
+                lower_ids = {rewards[lvl] for lvl in rewards if lvl < earned[-1]}
+                to_remove = [r for r in member.roles if r.id in lower_ids]
+                if to_remove:
+                    await member.remove_roles(*to_remove, reason="Rank promotion")
             except Exception:
-                logging.exception("Failed to grant level reward role %r", role_id)
+                logging.exception("Failed to update rank roles")
+
+    # Top-tier ceremony: commemorative portrait.
+    star_level = int(config.get("XPStarLevel", 0))
+    if star_level and reached_tier == star_level and config.get("XPStarPortraitPrompt"):
+        try:
+            asyncio.create_task(run_image_job(
+                channel,
+                ch_id=channel_key(message),
+                user_prompt=f"Commemorative portrait for {member.display_name}",
+                sd_prompt=str(config["XPStarPortraitPrompt"]),
+                neg=config.get("SDNegativePrompt", "(lowres, blurry, deformed)"),
+                requested_by=member.display_name,
+            ))
+        except Exception:
+            logging.exception("Star portrait failed")
 
 
 async def handle_xp_command(message: discord.Message) -> bool:

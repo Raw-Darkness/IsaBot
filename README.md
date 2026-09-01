@@ -100,7 +100,9 @@ To run it as a service on Linux (or WSL2 with systemd enabled), something like:
     "XPPerMessageMin" / "XPPerMessageMax" / "XPCooldownSec": XP per counted message and per-user cooldown
     "XPExcludedChannels":    channel IDs that never award XP (bot/spam channels)
     "XPAnnounceChannelID":   where level-ups are announced (0 = same channel as the message)
-    "XPRoleRewards":         {"level": role_id} roles granted when a level is reached
+    "XPRoleRewards":         {"level": role_id} rank roles; promotion swaps the lower rank for the higher one
+    "XPTierMessages":        {"level": "..."} special announcements when a rank is reached ({name}/{level})
+    "XPStarLevel" / "XPStarPortraitPrompt": top-tier ceremony — reaching this level also generates a commemorative image
     "LevelUpMessages":       level-up templates with {name} and {level} placeholders
     "ModRoleID":             role allowed to use mod commands (0 = disabled)
     "HoneypotChannelID":     posting here gets non-exempt users removed (0 = disabled)

@@ -85,5 +85,8 @@
     "XPRoleRewards": {},
     "LevelUpMessages": [
         "🎉 **{name}** reached level **{level}**!"
-    ]
+    ],
+    "XPTierMessages": {},
+    "XPStarLevel": 0,
+    "XPStarPortraitPrompt": ""
 }
