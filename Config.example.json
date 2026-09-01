@@ -40,5 +40,9 @@
     "ChannelHistoryPath": "channel_history.json",
     "DMHistoryDir": "dm_history",
     "HoneypotAction": "kick",
-    "HoneypotDeleteSeconds": 600
+    "HoneypotDeleteSeconds": 600,
+    "HoneypotQuips": [
+        "{name} found the one channel nobody should post in. Impressive, briefly.",
+        "The trap was clearly a trap. {name} posted anyway. Farewell."
+    ]
 }

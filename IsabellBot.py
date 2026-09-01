@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import signal
 import time
@@ -892,32 +893,21 @@ async def check_flood(message: discord.Message) -> bool:
 # =============================================================================
 # Honeypot
 # =============================================================================
-async def generate_mod_quip(offender_name: str) -> str:
-    name = (config.get("Name") or "the bot").strip()
-    persona = (config.get("Personality") or "").strip()
+# Pre-written removal announcements — no LLM call needed for a one-liner.
+# Override with a "HoneypotQuips" list in the config ({name} = offender).
+_DEFAULT_QUIPS = [
+    "{name} found the one channel nobody should post in. Impressive, briefly.",
+    "The trap was clearly a trap. {name} posted anyway. Farewell.",
+    "{name} wandered into the honeypot and got escorted out.",
+    "Another one for the honeypot. Goodbye, {name}.",
+]
 
-    system = (
-        f"You are {name}. Speak in first person as {name}. "
-        "Tone: witty, friendly, and professional. "
-        "Write exactly ONE short line (10-25 words) announcing that a user was removed. "
-        "No profanity, no personal attacks."
-    )
-    if persona:
-        system += "\n\nStay in character:\n" + persona
 
-    user = (
-        f"User '{offender_name}' was kicked for posting in a restricted honeypot channel. "
-        "Write the single-line announcement."
-    )
+def pick_mod_quip(offender_name: str) -> str:
+    quips = config.get("HoneypotQuips") or _DEFAULT_QUIPS
     try:
-        text = await chat_async(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.7,
-            max_tokens=60,
-        )
-        return (text or "").strip()
+        return str(random.choice(quips)).format(name=offender_name)
     except Exception:
-        logging.exception("LLM quip generation failed")
         return f"{offender_name} tripped the honeypot — clean removal completed."
 
 
@@ -1011,7 +1001,7 @@ async def honeypot_guard(message: discord.Message) -> bool:
             if MOD_CHANNEL_ID:
                 mod_ch = bot.get_channel(MOD_CHANNEL_ID) or await bot.fetch_channel(MOD_CHANNEL_ID)
             if mod_ch:
-                quip = await generate_mod_quip(member.display_name)
+                quip = pick_mod_quip(member.display_name)
                 status = removal_word if removed_ok else "NOT removed (action failed)"
                 if total_deleted < 0:
                     cleanup_line = f"🧹 Discord wiped their messages from the last {delete_seconds // 60} min."
