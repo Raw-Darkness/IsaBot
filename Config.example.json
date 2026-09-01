@@ -44,5 +44,8 @@
     "HoneypotQuips": [
         "{name} found the one channel nobody should post in. Impressive, briefly.",
         "The trap was clearly a trap. {name} posted anyway. Farewell."
-    ]
+    ],
+    "FrequencyPenalty": 0.3,
+    "PresencePenalty": 0.3,
+    "EmptyReplyFallback": "I have nothing to say to that."
 }

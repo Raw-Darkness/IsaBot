@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import difflib
 import functools
 import io
 import json
@@ -236,6 +237,14 @@ async def ensure_can_send(message: discord.Message) -> bool:
     except Exception:
         logging.exception("Permission check failed; assuming False")
         return False
+
+
+def _too_similar(a: str, b: str, threshold: float = 0.9) -> bool:
+    """True when two replies are near-duplicates (loop detection)."""
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    if not a or not b:
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
 
 def _strip_token_ci(text: str, token: str) -> str:
@@ -532,7 +541,9 @@ class ConversationManager:
 
         system = (
             "Compress the following conversation excerpt into a concise summary paragraph. "
-            "Preserve key facts, decisions, user names, and context the assistant needs to continue naturally. "
+            "Record only facts, events, decisions, user names, and open questions the assistant "
+            "needs to continue naturally. Do NOT describe or quote the assistant's writing style, "
+            "tone, or recurring phrasing — summarize what happened, never how it was worded. "
             "Write in third person. Keep it under 200 words."
         )
         user_msg = f"{existing}New turns to incorporate:\n{text_block}"
@@ -1045,8 +1056,48 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
                 msgs[-1] = {"role": "user", "content": text_override}
 
         logging.info("TEXT -> LLM | ch=%s | msg_id=%s", ch_id, message.id)
+        freq_pen = float(config.get("FrequencyPenalty", 0.3))
+        pres_pen = float(config.get("PresencePenalty", 0.3))
         async with message.channel.typing():
-            reply = await chat_async(msgs, temperature=0.6, max_tokens=600)
+            reply = await chat_async(
+                msgs, temperature=0.6, max_tokens=600,
+                frequency_penalty=freq_pen, presence_penalty=pres_pen,
+            )
+
+        if not (reply or "").strip():
+            # Model returned nothing (e.g. provider refusal). Don't store or
+            # send an empty turn — it would 400 on Discord and pollute memory.
+            logging.warning("Empty LLM reply in ch %s; sending fallback", ch_id)
+            await safe_send(message.channel, config.get("EmptyReplyFallback", "…I have nothing to say to that."))
+            return
+
+        # Loop breaker: a reply that near-duplicates a recent one gets one
+        # retry with an explicit nudge. A still-duplicated reply is sent but
+        # NOT stored, so the repetition cannot reinforce itself in memory.
+        recent = [t for r, t in list(cm.get(ch_id).turns)[-8:] if r == "assistant"]
+        if any(_too_similar(reply, prev) for prev in recent):
+            logging.warning("Repetition detected in ch %s; retrying with nudge", ch_id)
+            retry_msgs = msgs + [
+                {"role": "assistant", "content": reply},
+                {
+                    "role": "system",
+                    "content": (
+                        "Your last reply repeats an earlier one almost verbatim. Write a completely "
+                        "different reply: new sentence structure, new imagery, no reused phrases."
+                    ),
+                },
+            ]
+            fresh = await chat_async(
+                retry_msgs, temperature=0.9, max_tokens=600,
+                frequency_penalty=max(freq_pen, 0.5), presence_penalty=max(pres_pen, 0.5),
+            )
+            if (fresh or "").strip() and not any(_too_similar(fresh, prev) for prev in recent):
+                reply = fresh
+            else:
+                logging.warning("Repetition persists in ch %s; reply withheld from memory", ch_id)
+                await safe_send(message.channel, (fresh or "").strip() or reply)
+                return
+
         cm.add_assistant(ch_id, reply)
         await safe_send(message.channel, reply)
     except asyncio.CancelledError:
