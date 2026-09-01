@@ -36,3 +36,4 @@ __pycache__/
 .claude/
 image_memory.json
 isabot.db*
+game_faq*
