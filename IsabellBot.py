@@ -1275,11 +1275,16 @@ async def _handle_level_up(message: discord.Message, old_level: int, new_level: 
         earned = [lvl for lvl in sorted(rewards) if lvl <= new_level]
         if earned:
             try:
-                keep_id = rewards[earned[-1]]
-                to_add = message.guild.get_role(keep_id)
-                if to_add and to_add not in member.roles:
-                    await member.add_roles(to_add, reason=f"Level {earned[-1]} rank")
-                lower_ids = {rewards[lvl] for lvl in rewards if lvl < earned[-1]}
+                member_role_ids = {r.id for r in member.roles}
+                # A member already holding a HIGHER rank role (e.g. a manually
+                # granted top tier) never gets lower ranks pinned on them.
+                higher_held = [lvl for lvl in rewards if lvl > earned[-1] and rewards[lvl] in member_role_ids]
+                top_tier = max(higher_held) if higher_held else earned[-1]
+                if not higher_held:
+                    to_add = message.guild.get_role(rewards[earned[-1]])
+                    if to_add and to_add not in member.roles:
+                        await member.add_roles(to_add, reason=f"Level {earned[-1]} rank")
+                lower_ids = {rewards[lvl] for lvl in rewards if lvl < top_tier}
                 to_remove = [r for r in member.roles if r.id in lower_ids]
                 if to_remove:
                     await member.remove_roles(*to_remove, reason="Rank promotion")
