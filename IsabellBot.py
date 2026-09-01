@@ -9,6 +9,7 @@ import os
 import random
 import re
 import signal
+import sqlite3
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -165,7 +166,12 @@ async def chat_async(messages: list[dict[str, str]], _retries: int = 3, **kwargs
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
-bot = discord.Client(intents=intents)
+# Joins/leaves in the mod log need the privileged Server Members intent —
+# enable it in the developer portal FIRST, then set EnableMembersIntent true.
+if config.get("EnableMembersIntent"):
+    intents.members = True
+# Larger cache so deleted/edited message content is usually available to log.
+bot = discord.Client(intents=intents, max_messages=10000)
 
 
 _background_tasks_started = False
@@ -1102,6 +1108,77 @@ def build_system_prefix() -> str:
 
 
 # =============================================================================
+# User Records (SQLite)
+# =============================================================================
+# Per-user incident history: auto-recorded flags/honeypot trips plus manual
+# mod notes. Queried via !record / shown in !whois. No automated actions yet.
+_db: sqlite3.Connection | None = None
+
+
+def get_db() -> sqlite3.Connection:
+    global _db
+    if _db is None:
+        _db = sqlite3.connect(config.get("DatabasePath", "isabot.db"))
+        _db.execute("PRAGMA journal_mode=WAL")
+        _db.execute(
+            """CREATE TABLE IF NOT EXISTS user_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                detail TEXT DEFAULT '',
+                moderator_id INTEGER DEFAULT 0,
+                ts REAL NOT NULL
+            )"""
+        )
+        _db.execute("CREATE INDEX IF NOT EXISTS idx_user_records_user ON user_records(user_id)")
+        _db.commit()
+    return _db
+
+
+def add_user_record(user_id: int, kind: str, detail: str = "", moderator_id: int = 0):
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO user_records (user_id, kind, detail, moderator_id, ts) VALUES (?, ?, ?, ?, ?)",
+            (int(user_id), kind, (detail or "")[:500], int(moderator_id), time.time()),
+        )
+        db.commit()
+    except Exception:
+        logging.exception("Failed to add user record")
+
+
+def get_user_records(user_id: int, limit: int = 25) -> list[tuple]:
+    try:
+        cur = get_db().execute(
+            "SELECT kind, detail, moderator_id, ts FROM user_records WHERE user_id = ? ORDER BY ts DESC LIMIT ?",
+            (int(user_id), limit),
+        )
+        return cur.fetchall()
+    except Exception:
+        logging.exception("Failed to read user records")
+        return []
+
+
+def summarize_user_record_counts(user_id: int) -> str:
+    try:
+        cur = get_db().execute(
+            "SELECT kind, COUNT(*) FROM user_records WHERE user_id = ? GROUP BY kind ORDER BY COUNT(*) DESC",
+            (int(user_id),),
+        )
+        parts = [f"{n}× {kind.replace('_', ' ')}" for kind, n in cur.fetchall()]
+        return ", ".join(parts)
+    except Exception:
+        logging.exception("Failed to summarize user records")
+        return ""
+
+
+def _parse_user_ref(arg: str) -> int | None:
+    """Accept a raw user ID or a <@mention>."""
+    m = re.match(r"^<@!?(\d+)>$", (arg or "").strip()) or re.match(r"^(\d+)$", (arg or "").strip())
+    return int(m.group(1)) if m else None
+
+
+# =============================================================================
 # Spam & Flood Detection
 # =============================================================================
 _INVITE_RE = re.compile(
@@ -1183,6 +1260,7 @@ async def check_spam(message: discord.Message) -> bool:
             f"Reason: {', '.join(reason)}\n"
             f"Message: {text[:200]}"
         )
+        add_user_record(member.id, "spam_flag", f"{', '.join(reason)} | {text[:150]}")
         return True
     return False
 
@@ -1218,6 +1296,7 @@ async def check_flood(message: discord.Message) -> bool:
             f"Same message posted in {len(channels_with_same)} channels within {_FLOOD_WINDOW}s\n"
             f"Content: {content[:200]}"
         )
+        add_user_record(member.id, "flood_flag", f"same msg in {len(channels_with_same)} channels | {content[:150]}")
         history.clear()
         return True
     return False
@@ -1329,6 +1408,12 @@ async def honeypot_guard(message: discord.Message) -> bool:
                     total_deleted += await purge_channel(ch)
             logging.info("Honeypot: %s %s; purged ~%d msgs.", removal_word if removed_ok else "FAILED to remove", member, total_deleted)
 
+        add_user_record(
+            member.id,
+            "honeypot_ban" if action == "ban" else "honeypot_kick",
+            f"posted in honeypot channel; removed_ok={removed_ok}",
+        )
+
         try:
             mod_ch = None
             if MOD_CHANNEL_ID:
@@ -1353,6 +1438,153 @@ async def honeypot_guard(message: discord.Message) -> bool:
     except Exception:
         logging.exception("Honeypot guard failed")
         return False
+
+
+# =============================================================================
+# Mod Log
+# =============================================================================
+def _modlog_channel_id() -> int:
+    return int(config.get("ModLogChannelID", 0))
+
+
+async def _modlog_send(embed: discord.Embed):
+    ch_id = _modlog_channel_id()
+    if not ch_id:
+        return
+    try:
+        ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+        await ch.send(embed=embed)
+    except Exception:
+        logging.exception("Mod log send failed")
+
+
+def _trunc(text: str, n: int = 900) -> str:
+    text = text or ""
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+@bot.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    try:
+        if payload.guild_id is None or payload.channel_id == _modlog_channel_id():
+            return
+        msg = payload.cached_message
+        if msg is not None and msg.author.bot:
+            return
+        embed = discord.Embed(title="Message deleted", color=0xE74C3C)
+        if msg is not None:
+            embed.add_field(name="Author", value=f"{msg.author} ({msg.author.id})", inline=False)
+            if msg.content:
+                embed.add_field(name="Content", value=_trunc(msg.content), inline=False)
+            if msg.attachments:
+                embed.add_field(name="Attachments", value=_trunc(", ".join(a.filename for a in msg.attachments), 200), inline=False)
+        else:
+            embed.description = "Content unknown (message was not cached)."
+        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>")
+        embed.add_field(name="When", value=f"<t:{int(time.time())}:R>")
+        await _modlog_send(embed)
+    except Exception:
+        logging.exception("on_raw_message_delete failed")
+
+
+@bot.event
+async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent):
+    try:
+        if payload.guild_id is None or payload.channel_id == _modlog_channel_id():
+            return
+        embed = discord.Embed(
+            title="Bulk delete",
+            description=f"{len(payload.message_ids)} messages removed in <#{payload.channel_id}> (e.g. a purge).",
+            color=0xE74C3C,
+        )
+        await _modlog_send(embed)
+    except Exception:
+        logging.exception("on_raw_bulk_message_delete failed")
+
+
+@bot.event
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+    try:
+        if payload.guild_id is None or payload.channel_id == _modlog_channel_id():
+            return
+        data = payload.data or {}
+        if "content" not in data:
+            return  # embed/pin/component update, not a text edit
+        new_content = data.get("content") or ""
+        cached = payload.cached_message
+        if cached is not None:
+            if cached.author.bot:
+                return
+            if (cached.content or "") == new_content:
+                return  # link unfurl etc.
+            old_content = cached.content or ""
+            author_desc = f"{cached.author} ({cached.author.id})"
+        else:
+            author = data.get("author") or {}
+            if author.get("bot"):
+                return
+            old_content = "*unknown (not cached)*"
+            author_desc = f"<@{author.get('id', '?')}> ({author.get('id', '?')})"
+        embed = discord.Embed(title="Message edited", color=0xE67E22)
+        embed.add_field(name="Author", value=author_desc, inline=False)
+        embed.add_field(name="Before", value=_trunc(old_content), inline=False)
+        embed.add_field(name="After", value=_trunc(new_content), inline=False)
+        jump = f"https://discord.com/channels/{payload.guild_id}/{payload.channel_id}/{payload.message_id}"
+        embed.add_field(name="Where", value=f"<#{payload.channel_id}> · [jump]({jump})")
+        await _modlog_send(embed)
+    except Exception:
+        logging.exception("on_raw_message_edit failed")
+
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user):
+    try:
+        embed = discord.Embed(title="Member banned", color=0x992D22)
+        embed.add_field(name="User", value=f"{user} ({user.id})")
+        await _modlog_send(embed)
+    except Exception:
+        logging.exception("on_member_ban failed")
+
+
+@bot.event
+async def on_member_unban(guild: discord.Guild, user):
+    try:
+        embed = discord.Embed(title="Member unbanned", color=0x2ECC71)
+        embed.add_field(name="User", value=f"{user} ({user.id})")
+        await _modlog_send(embed)
+    except Exception:
+        logging.exception("on_member_unban failed")
+
+
+# The two below only fire when the Server Members intent is enabled
+# (EnableMembersIntent in config + the toggle in the developer portal).
+@bot.event
+async def on_member_join(member: discord.Member):
+    try:
+        age = datetime.now(timezone.utc) - member.created_at
+        embed = discord.Embed(title="Member joined", color=0x2ECC71)
+        embed.add_field(name="User", value=f"{member} ({member.id})")
+        embed.add_field(name="Account created", value=f"<t:{int(member.created_at.timestamp())}:R>")
+        if age < timedelta(hours=24):
+            embed.description = "⚠️ **New account** (less than 24h old)"
+            embed.color = 0xE67E22
+        await _modlog_send(embed)
+    except Exception:
+        logging.exception("on_member_join failed")
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    try:
+        roles = ", ".join(r.name for r in member.roles if r.name != "@everyone") or "None"
+        embed = discord.Embed(title="Member left", color=0x95A5A6)
+        embed.add_field(name="User", value=f"{member} ({member.id})")
+        if member.joined_at:
+            embed.add_field(name="Joined", value=f"<t:{int(member.joined_at.timestamp())}:R>")
+        embed.add_field(name="Roles", value=_trunc(roles, 300), inline=False)
+        await _modlog_send(embed)
+    except Exception:
+        logging.exception("on_member_remove failed")
 
 
 # =============================================================================
@@ -1540,7 +1772,7 @@ async def handle_image_message(message: discord.Message, text_override: str | No
 # =============================================================================
 # Command access levels
 _OWNER_COMMANDS = {"!reload"}
-_MOD_COMMANDS = {"!summary", "!activity", "!whois", "!flags", "!search", "!clearhistory", "!help"}
+_MOD_COMMANDS = {"!summary", "!activity", "!whois", "!flags", "!search", "!clearhistory", "!note", "!record", "!help"}
 
 
 def _is_command_channel(message: discord.Message) -> bool:
@@ -1697,6 +1929,9 @@ async def handle_bot_command(message: discord.Message) -> bool:
             f"Roles: {roles}\n"
             f"Messages (last 24h): ~{msg_count}"
         )
+        rec_summary = summarize_user_record_counts(m.id)
+        if rec_summary:
+            info += f"\nRecord: {rec_summary} — `!record {m.id}` for details"
         await ch.send(info)
         return True
 
@@ -1802,6 +2037,43 @@ async def handle_bot_command(message: discord.Message) -> bool:
             await ch.send(f"No stored history found for channel `{target_id}`.")
         return True
 
+    # --- !note <user> <text> ---
+    elif cmd == "!note":
+        note_parts = arg.split(None, 1)
+        target = _parse_user_ref(note_parts[0]) if note_parts else None
+        if not target or len(note_parts) < 2:
+            await ch.send("Usage: `!note <user_id or @mention> <text>`")
+            return True
+        add_user_record(target, "note", note_parts[1], moderator_id=message.author.id)
+        await ch.send(f"📝 Note added for <@{target}> (`{target}`).")
+        logging.info("Note added for %s by %s", target, message.author)
+        return True
+
+    # --- !record <user> ---
+    elif cmd == "!record":
+        target = _parse_user_ref(arg)
+        if not target:
+            await ch.send("Usage: `!record <user_id or @mention>`")
+            return True
+        rows = get_user_records(target, limit=25)
+        if not rows:
+            await ch.send(f"No records for <@{target}> (`{target}`).")
+            return True
+        summary = summarize_user_record_counts(target)
+        lines = [f"**Record for <@{target}>** (`{target}`) — {summary}"]
+        for kind, detail, moderator_id, ts in rows:
+            when = f"<t:{int(ts)}:d>"
+            entry = f"{when} · **{kind.replace('_', ' ')}**"
+            if detail:
+                entry += f" — {detail[:150]}"
+            if moderator_id:
+                entry += f" (by <@{moderator_id}>)"
+            lines.append(entry)
+        full = "\n".join(lines)
+        for chunk in [full[i:i + 1900] for i in range(0, len(full), 1900)]:
+            await ch.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+        return True
+
     # --- !help ---
     elif cmd == "!help":
         help_text = (
@@ -1812,6 +2084,8 @@ async def handle_bot_command(message: discord.Message) -> bool:
             "`!flags` — recent spam/flood alerts (last 24h)\n"
             "`!search <term>` — search messages (last 24h)\n"
             "`!clearhistory [channel_id]` — wipe the bot's memory for a channel\n"
+            "`!note <user> <text>` — add a note to a user's record\n"
+            "`!record <user>` — show a user's record (flags, honeypot trips, notes)\n"
             "`!help` — this message"
         )
         if is_owner:

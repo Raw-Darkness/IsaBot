@@ -72,5 +72,8 @@
             "positive": "masterpiece, best quality, anime style, ",
             "negative": "photorealistic, 3d render"
         }
-    }
+    },
+    "ModLogChannelID": 0,
+    "DatabasePath": "isabot.db",
+    "EnableMembersIntent": false
 }

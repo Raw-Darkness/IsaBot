@@ -35,3 +35,4 @@ __pycache__/
 *.pyc
 .claude/
 image_memory.json
+isabot.db*

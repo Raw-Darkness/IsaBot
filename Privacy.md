@@ -6,7 +6,7 @@ Relevant message content and recent conversation context may be sent to a third-
 
 To provide a persistent conversation memory, Isabot stores recent conversation history locally on the machine running the bot. This includes messages from channels it participates in and direct messages sent to the bot. Older history is periodically condensed into short summaries.
 
-Isabot may also process Discord user IDs and related Discord account information when required for moderation and bot functionality (for example spam and flood detection, and alerting server moderators).
+Isabot may also process Discord user IDs and related Discord account information when required for moderation and bot functionality (for example spam and flood detection, and alerting server moderators). Moderation events — such as spam flags and message deletions or edits in moderated channels — may be recorded in moderator-only logs to help the moderation team keep the community safe.
 
 Any data stored by Isabot is used only to operate the bot. Users may request deletion of data associated with them by contacting the server administrators.
 
