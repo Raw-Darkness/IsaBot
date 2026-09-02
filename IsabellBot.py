@@ -188,6 +188,7 @@ async def on_ready():
         bot.loop.create_task(_periodic_save_loop())
         bot.loop.create_task(_daily_summary_scheduler())
         bot.loop.create_task(_config_watch_loop())
+        bot.loop.create_task(_faq_answer_loop())
 
 
 # =============================================================================
@@ -2317,6 +2318,100 @@ async def on_message(message: discord.Message):
         asyncio.create_task(handle_text_message(message, text_override=text_for_logic))
     except Exception:
         logging.exception("on_message router failure")
+
+
+# =============================================================================
+# FAQ Auto-Answer (questions forum)
+# =============================================================================
+# Community-first: a question thread only gets a bot answer after it has sat
+# without any human reply for FAQAnswerDelayMin minutes. Answers are grounded
+# strictly in the FAQ file — no coverage, no answer.
+async def _post_faq_answer(thread, question: str) -> bool:
+    faq_path = config.get("FAQPath", "game_faq.txt")
+    try:
+        with open(faq_path, "r", encoding="utf-8") as f:
+            faq = f.read().strip()
+    except Exception:
+        logging.exception("FAQ: cannot read %s", faq_path)
+        return False
+    if not faq:
+        return False
+
+    name = config.get("Name", "the bot")
+    system = (
+        f"You are {name}, answering a player's question in the game's Discord questions forum. "
+        "Answer ONLY with information from the FAQ below — never invent, never use outside knowledge. "
+        "Be concrete and concise (under 150 words). A touch of in-character flavor is fine, "
+        "but clarity beats persona. If the FAQ does not clearly answer the question, reply with exactly: NO_ANSWER\n\n"
+        "FAQ:\n" + faq
+    )
+    try:
+        reply = await chat_async(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": f"Player question:\n{question}"}],
+            temperature=0.3,
+            max_tokens=400,
+        )
+    except Exception:
+        logging.exception("FAQ: LLM call failed")
+        return False
+    reply = (reply or "").strip()
+    if not reply or "NO_ANSWER" in reply:
+        logging.info("FAQ: no coverage for thread %r", question[:80])
+        return False
+    footer = "\n-# I answer from the FAQ when a question has waited a while — fellow islanders may know even more."
+    await safe_send(thread, reply + footer)
+    logging.info("FAQ: answered thread %r", question[:80])
+    return True
+
+
+async def _faq_scan_once():
+    forum_id = int(config.get("QuestionsForumID", 0))
+    if not forum_id or not config.get("FAQEnabled", True):
+        return
+    forum = bot.get_channel(forum_id)
+    if forum is None or not hasattr(forum, "threads"):
+        return
+    delay = timedelta(minutes=int(config.get("FAQAnswerDelayMin", 30)))
+    max_age = timedelta(hours=int(config.get("FAQMaxThreadAgeHours", 24)))
+    max_answers = int(config.get("FAQMaxAnswersPerScan", 3))
+    now = datetime.now(timezone.utc)
+    answered = 0
+
+    for thread in list(forum.threads):
+        if answered >= max_answers:
+            break
+        created = getattr(thread, "created_at", None)
+        if created is None:
+            continue
+        age = now - created
+        if age < delay or age > max_age:
+            continue
+        try:
+            msgs = [m async for m in thread.history(limit=50, oldest_first=True)]
+        except Exception:
+            continue
+        if any(m.author.id == bot.user.id for m in msgs):
+            continue  # we already answered
+        owner_id = thread.owner_id
+        if any(not m.author.bot and m.author.id != owner_id for m in msgs):
+            continue  # a human already replied
+        starter = next((m for m in msgs if m.author.id == owner_id and (m.content or "").strip()), None)
+        question = thread.name or ""
+        if starter:
+            question = f"{question}\n{starter.content[:1500]}"
+        if await _post_faq_answer(thread, question):
+            answered += 1
+
+
+async def _faq_answer_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await _faq_scan_once()
+        except Exception:
+            logging.exception("FAQ scan failed")
+        await asyncio.sleep(600)
 
 
 # =============================================================================

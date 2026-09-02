@@ -89,5 +89,11 @@
     "XPTierMessages": {},
     "XPStarLevel": 0,
     "XPStarPortraitPrompt": "",
-    "XPAnnounceRanksOnly": false
+    "XPAnnounceRanksOnly": false,
+    "FAQEnabled": true,
+    "FAQPath": "game_faq.txt",
+    "QuestionsForumID": 0,
+    "FAQAnswerDelayMin": 30,
+    "FAQMaxThreadAgeHours": 24,
+    "FAQMaxAnswersPerScan": 3
 }
