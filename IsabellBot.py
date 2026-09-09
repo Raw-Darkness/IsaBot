@@ -2398,12 +2398,21 @@ async def _post_faq_answer(thread, question: str) -> bool:
     return True
 
 
+# thread_id -> FAQ file mtime when it was judged. A thread is evaluated once;
+# editing the FAQ file gives every still-open thread one fresh look.
+_faq_evaluated: dict[int, float] = {}
+
+
 async def _faq_scan_once():
     forum_id = int(config.get("QuestionsForumID", 0))
     if not forum_id or not config.get("FAQEnabled", True):
         return
     forum = bot.get_channel(forum_id)
     if forum is None or not hasattr(forum, "threads"):
+        return
+    try:
+        faq_mtime = os.path.getmtime(config.get("FAQPath", "game_faq.txt"))
+    except OSError:
         return
     delay = timedelta(minutes=int(config.get("FAQAnswerDelayMin", 30)))
     max_age = timedelta(hours=int(config.get("FAQMaxThreadAgeHours", 24)))
@@ -2420,6 +2429,8 @@ async def _faq_scan_once():
         age = now - created
         if age < delay or age > max_age:
             continue
+        if _faq_evaluated.get(thread.id) == faq_mtime:
+            continue  # already judged against this version of the FAQ
         try:
             msgs = [m async for m in thread.history(limit=50, oldest_first=True)]
         except Exception:
@@ -2433,6 +2444,7 @@ async def _faq_scan_once():
         question = thread.name or ""
         if starter:
             question = f"{question}\n{starter.content[:1500]}"
+        _faq_evaluated[thread.id] = faq_mtime
         if await _post_faq_answer(thread, question):
             answered += 1
 
