@@ -20,6 +20,7 @@ from typing import Any
 
 import aiohttp
 import discord
+from discord import app_commands
 from openai import AsyncOpenAI
 from PIL import Image
 
@@ -124,6 +125,7 @@ class LLMResponseError(Exception):
 async def chat_async(messages: list[dict[str, str]], _retries: int = 3, **kwargs) -> str:
     """Run a chat completion with retry + exponential backoff."""
     kwargs.pop("reasoning", None)
+    model = kwargs.pop("model", None) or config["OpenaiModel"]
     kwargs["extra_body"] = kwargs.get("extra_body", {})
     kwargs["extra_body"]["reasoning"] = {"enabled": False}
 
@@ -132,7 +134,7 @@ async def chat_async(messages: list[dict[str, str]], _retries: int = 3, **kwargs
         try:
             resp = await llm_client.chat.completions.create(
                 messages=messages,
-                model=config["OpenaiModel"],
+                model=model,
                 **kwargs,
             )
 
@@ -172,6 +174,7 @@ if config.get("EnableMembersIntent"):
     intents.members = True
 # Larger cache so deleted/edited message content is usually available to log.
 bot = discord.Client(intents=intents, max_messages=10000)
+tree = app_commands.CommandTree(bot)
 
 
 _background_tasks_started = False
@@ -189,6 +192,7 @@ async def on_ready():
         bot.loop.create_task(_daily_summary_scheduler())
         bot.loop.create_task(_config_watch_loop())
         bot.loop.create_task(_faq_answer_loop())
+        bot.loop.create_task(_sync_app_commands())
 
 
 # =============================================================================
@@ -2359,20 +2363,21 @@ async def on_message(message: discord.Message):
 # Community-first: a question thread only gets a bot answer after it has sat
 # without any human reply for FAQAnswerDelayMin minutes. Answers are grounded
 # strictly in the FAQ file — no coverage, no answer.
-async def _post_faq_answer(thread, question: str) -> bool:
+async def faq_answer(question: str) -> str | None:
+    """Answer a question strictly from the FAQ file; None when it isn't covered."""
     faq_path = config.get("FAQPath", "game_faq.txt")
     try:
         with open(faq_path, "r", encoding="utf-8") as f:
             faq = f.read().strip()
     except Exception:
         logging.exception("FAQ: cannot read %s", faq_path)
-        return False
+        return None
     if not faq:
-        return False
+        return None
 
     name = config.get("Name", "the bot")
     system = (
-        f"You are {name}, answering a player's question in the game's Discord questions forum. "
+        f"You are {name}, answering a player's question about the game. "
         "Answer ONLY with information from the FAQ below — never invent, never use outside knowledge. "
         "Be concrete and concise (under 150 words). A touch of in-character flavor is fine, "
         "but clarity beats persona. If the FAQ does not clearly answer the question, reply with exactly: NO_ANSWER\n\n"
@@ -2384,18 +2389,76 @@ async def _post_faq_answer(thread, question: str) -> bool:
              {"role": "user", "content": f"Player question:\n{question}"}],
             temperature=0.3,
             max_tokens=400,
+            model=config.get("FAQModel") or None,
         )
     except Exception:
         logging.exception("FAQ: LLM call failed")
-        return False
+        return None
     reply = (reply or "").strip()
     if not reply or "NO_ANSWER" in reply:
+        return None
+    return reply
+
+
+async def _post_faq_answer(thread, question: str) -> bool:
+    reply = await faq_answer(question)
+    if reply is None:
         logging.info("FAQ: no coverage for thread %r", question[:80])
         return False
     footer = "\n-# I answer from the FAQ when a question has waited a while — fellow islanders may know even more."
     await safe_send(thread, reply + footer)
     logging.info("FAQ: answered thread %r", question[:80])
     return True
+
+
+# ---- /ask: private, on-demand FAQ lookup ----
+_ask_buckets: dict[int, TokenBucket] = {}
+
+
+def _get_ask_bucket(user_id: int) -> TokenBucket:
+    if user_id not in _ask_buckets:
+        _ask_buckets[user_id] = TokenBucket(capacity=3, refill_rate=1.0 / 20.0)
+    return _ask_buckets[user_id]
+
+
+@tree.command(name="ask", description="Ask the game FAQ — the answer is shown only to you")
+@app_commands.describe(question="Your question about the game")
+async def ask_command(interaction: discord.Interaction, question: str):
+    try:
+        if not config.get("FAQEnabled", True):
+            await interaction.response.send_message("The FAQ is currently disabled.", ephemeral=True)
+            return
+        if not _get_ask_bucket(interaction.user.id).consume():
+            await interaction.response.send_message("Easy, darling — one question at a time. Try again in a moment.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        answer = await faq_answer(question.strip()[:500])
+        if answer is None:
+            forum_id = int(config.get("QuestionsForumID", 0))
+            hint = f" Ask in <#{forum_id}> and a fellow islander will help." if forum_id else ""
+            await interaction.followup.send(f"The FAQ doesn't cover that one.{hint}", ephemeral=True)
+            logging.info("/ask: no coverage for %r", question[:80])
+            return
+        await interaction.followup.send(answer[:1900], ephemeral=True)
+        logging.info("/ask: answered %r", question[:80])
+    except Exception:
+        logging.exception("/ask failed")
+
+
+async def _sync_app_commands():
+    """Register slash commands. A guild-scoped sync is instant; global takes up to an hour."""
+    await bot.wait_until_ready()
+    try:
+        gid = int(config.get("AppCommandGuildID", 0))
+        if gid:
+            guild = discord.Object(id=gid)
+            tree.copy_global_to(guild=guild)
+            synced = await tree.sync(guild=guild)
+        else:
+            synced = await tree.sync()
+        logging.info("Synced %d app command(s): %s", len(synced), [c.name for c in synced])
+    except Exception:
+        logging.exception("App command sync failed")
 
 
 # thread_id -> FAQ file mtime when it was judged. A thread is evaluated once;
