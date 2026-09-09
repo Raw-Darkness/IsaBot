@@ -11,6 +11,7 @@ import re
 import signal
 import sqlite3
 import time
+import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -199,6 +200,7 @@ async def on_ready():
         bot.loop.create_task(_config_watch_loop())
         bot.loop.create_task(_faq_answer_loop())
         bot.loop.create_task(_sync_app_commands())
+        bot.loop.create_task(_stats_loop())
 
 
 # =============================================================================
@@ -1146,6 +1148,7 @@ def get_db() -> sqlite3.Connection:
             )"""
         )
         _db.execute("CREATE INDEX IF NOT EXISTS idx_user_records_user ON user_records(user_id)")
+        _db.execute("CREATE TABLE IF NOT EXISTS highlights (message_id INTEGER PRIMARY KEY, ts REAL NOT NULL)")
         _db.execute(
             """CREATE TABLE IF NOT EXISTS user_xp (
                 user_id INTEGER PRIMARY KEY,
@@ -2453,6 +2456,271 @@ async def ask_command(interaction: discord.Interaction, question: str):
         logging.info("/ask: answered %r", question[:80])
     except Exception:
         logging.exception("/ask failed")
+
+
+# ---- /wiki: search the game wiki (MediaWiki API, no LLM) ----
+def _strip_html(s: str) -> str:
+    return re.sub(r"<[^>]+>", "", s or "").replace("&quot;", '"').replace("&amp;", "&").replace("&#039;", "'")
+
+
+@tree.command(name="wiki", description="Search the game wiki")
+@app_commands.describe(term="What to search for", share="Post the result publicly instead of only to you")
+async def wiki_command(interaction: discord.Interaction, term: str, share: bool = False):
+    try:
+        base = (config.get("WikiBaseURL") or "").rstrip("/")
+        if not base:
+            await interaction.response.send_message("No wiki is configured.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=not share, thinking=True)
+        url = f"{base}/w/api.php?action=query&list=search&format=json&srlimit=5&srprop=snippet&srsearch=" + urllib.parse.quote(term)
+        results = []
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(url, headers={"User-Agent": "IsaBot"}) as r:
+                    r.raise_for_status()
+                    results = (await r.json()).get("query", {}).get("search", [])
+        except Exception:
+            logging.exception("Wiki search failed")
+            await interaction.followup.send("The wiki isn't answering right now — try again in a bit.", ephemeral=not share)
+            return
+        if not results:
+            await interaction.followup.send(f"No wiki page found for **{term[:100]}**.", ephemeral=not share)
+            return
+        top = results[0]
+        link = lambda t: f"{base}/wiki/" + urllib.parse.quote(t.replace(" ", "_"))
+        embed = discord.Embed(title=top["title"], url=link(top["title"]), description=_strip_html(top.get("snippet", ""))[:400] + "…", color=0x3498DB)
+        if len(results) > 1:
+            embed.add_field(name="More results", value="\n".join(f"[{r['title']}]({link(r['title'])})" for r in results[1:5]), inline=False)
+        embed.set_footer(text="Wicked Island wiki")
+        await interaction.followup.send(embed=embed, ephemeral=not share)
+    except Exception:
+        logging.exception("/wiki failed")
+
+
+# ---- /lore: in-character lore lookup grounded in the lore file ----
+@tree.command(name="lore", description="Ask about the world's lore — the answer is shown only to you")
+@app_commands.describe(topic="What do you want to know about?")
+async def lore_command(interaction: discord.Interaction, topic: str):
+    try:
+        if not LORE_CONTEXT:
+            await interaction.response.send_message("I have no lore to share.", ephemeral=True)
+            return
+        if not _get_ask_bucket(interaction.user.id).consume():
+            await interaction.response.send_message("Patience, darling — one tale at a time.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        name = config.get("Name", "the bot")
+        persona = (config.get("Personality") or "").strip()
+        system = (
+            f"You are {name}. Answer the question about the world using ONLY the lore below — never invent facts. "
+            "Stay in character and keep it under 200 words; substance first, flavor second. "
+            "If the lore does not cover the topic, say so in character in one or two lines.\n\n"
+            + (f"Character:\n{persona[:1500]}\n\n" if persona else "")
+            + "World lore:\n" + LORE_CONTEXT
+        )
+        try:
+            reply = await chat_async(
+                [{"role": "system", "content": system}, {"role": "user", "content": topic.strip()[:500]}],
+                temperature=0.5,
+                max_tokens=450,
+                model=config.get("LoreModel") or utility_model(),
+            )
+        except Exception:
+            logging.exception("/lore LLM call failed")
+            reply = None
+        reply = (reply or "").strip() or "The pages are silent on that, darling. Ask me something else."
+        await interaction.followup.send(reply[:1900], ephemeral=True)
+        logging.info("/lore: %r", topic[:80])
+    except Exception:
+        logging.exception("/lore failed")
+
+
+# ---- /draw: the image pipeline as a proper command ----
+def _image_channel_allowed(channel) -> bool:
+    if channel is None:
+        return False
+    if isinstance(channel, discord.DMChannel):
+        return True
+    allowed = set(config.get("AllowedChannels", []))
+    parent = getattr(channel, "parent", None)
+    return channel.id in allowed or (parent is not None and parent.id in allowed)
+
+
+@tree.command(name="draw", description="Ask for an image")
+@app_commands.describe(
+    prompt="What to draw",
+    style="Style preset (optional)",
+    aspect="Image shape",
+    count="How many images (1-4)",
+    exact="Send your prompt to Stable Diffusion unchanged (skip the rewrite)",
+)
+@app_commands.choices(aspect=[
+    app_commands.Choice(name="square", value="square"),
+    app_commands.Choice(name="portrait", value="portrait"),
+    app_commands.Choice(name="landscape", value="landscape"),
+])
+async def draw_command(
+    interaction: discord.Interaction,
+    prompt: str,
+    style: str | None = None,
+    aspect: app_commands.Choice[str] | None = None,
+    count: app_commands.Range[int, 1, 4] = 1,
+    exact: bool = False,
+):
+    try:
+        channel = interaction.channel
+        if not _image_channel_allowed(channel):
+            allowed = ", ".join(f"<#{c}>" for c in config.get("AllowedChannels", [])) or "my channels"
+            await interaction.response.send_message(f"I only paint in {allowed} — or in DMs.", ephemeral=True)
+            return
+        if not get_user_bucket(interaction.user.id).consume():
+            await interaction.response.send_message("You're requesting images too fast — slow down a bit.", ephemeral=True)
+            return
+
+        width = height = None
+        if aspect and aspect.value == "portrait":
+            size = config.get("SDPortraitSize") or []
+            if len(size) == 2:
+                width, height = int(size[0]), int(size[1])
+        elif aspect and aspect.value == "landscape":
+            size = config.get("SDLandscapeSize") or []
+            if len(size) == 2:
+                width, height = int(size[0]), int(size[1])
+
+        positive_prefix = None
+        neg = config.get("SDNegativePrompt", "(lowres, blurry, deformed)")
+        if style:
+            presets = config.get("SDStylePresets") or {}
+            preset = next((v for k, v in presets.items() if k.lower() == style.lower()), None)
+            if preset:
+                positive_prefix = preset.get("positive", "")
+                neg = preset.get("negative") or neg
+
+        await interaction.response.send_message("Hang on while I sketch that for you…")
+        status_msg = await interaction.original_response()
+        raw = prompt.strip()[:1500]
+        sd_prompt = raw if (exact or _looks_like_tag_prompt(raw)) else await compile_sd_prompt(raw)
+        parent = getattr(channel, "parent", None)
+        ch_id = parent.id if parent is not None else channel.id
+        asyncio.create_task(run_image_job(
+            channel,
+            ch_id=ch_id,
+            user_prompt=raw,
+            sd_prompt=sd_prompt,
+            neg=neg,
+            batch=int(count),
+            width=width,
+            height=height,
+            positive_prefix=positive_prefix,
+            requested_by=interaction.user.display_name,
+            status_msg=status_msg,
+        ))
+    except Exception:
+        logging.exception("/draw failed")
+
+
+@draw_command.autocomplete("style")
+async def _draw_style_autocomplete(interaction: discord.Interaction, current: str):
+    presets = config.get("SDStylePresets") or {}
+    return [app_commands.Choice(name=k, value=k) for k in presets if current.lower() in k.lower()][:25]
+
+
+# ---- Highlights (starboard) ----
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    try:
+        hl_id = int(config.get("HighlightsChannelID", 0))
+        if not hl_id or payload.guild_id is None or payload.channel_id == hl_id:
+            return
+        if str(payload.emoji) != config.get("HighlightEmoji", "⭐"):
+            return
+        channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
+        msg = await channel.fetch_message(payload.message_id)
+        images_only = config.get("HighlightImagesOnly", True)
+        is_bot_image = msg.author.id == bot.user.id and any(
+            (a.content_type or "").startswith("image/") for a in msg.attachments
+        )
+        if images_only and not is_bot_image:
+            return
+        if msg.author.bot and not is_bot_image:
+            return
+        count = 0
+        for reaction in msg.reactions:
+            if str(reaction.emoji) == config.get("HighlightEmoji", "⭐"):
+                count = reaction.count
+        if count < int(config.get("HighlightThreshold", 3)):
+            return
+        db = get_db()
+        if db.execute("SELECT 1 FROM highlights WHERE message_id = ?", (msg.id,)).fetchone():
+            return
+        db.execute("INSERT INTO highlights (message_id, ts) VALUES (?, ?)", (msg.id, time.time()))
+        db.commit()
+
+        hl = bot.get_channel(hl_id) or await bot.fetch_channel(hl_id)
+        jump = f"https://discord.com/channels/{payload.guild_id}/{payload.channel_id}/{payload.message_id}"
+        embed = discord.Embed(color=0xF1C40F)
+        files = []
+        if is_bot_image:
+            rec = ipm.find_by_message(msg.id)
+            requester = (rec.meta.get("by") if rec else None) or "unknown"
+            prompt = (rec.user_prompt if rec else "") or ""
+            embed.title = f"⭐ {count} · requested by {requester}"
+            if prompt:
+                embed.description = prompt[:300]
+            att = next(a for a in msg.attachments if (a.content_type or "").startswith("image/"))
+            data = await att.read()
+            files.append(discord.File(io.BytesIO(data), filename=att.filename))
+            embed.set_image(url=f"attachment://{att.filename}")
+        else:
+            embed.title = f"⭐ {count} · {msg.author.display_name}"
+            embed.description = (msg.content or "")[:1000]
+            embed.set_thumbnail(url=msg.author.display_avatar.url)
+        embed.add_field(name="Source", value=f"[jump to message]({jump}) in <#{payload.channel_id}>")
+        await hl.send(embed=embed, files=files)
+        logging.info("Highlight: message %s (%d %s)", msg.id, count, config.get("HighlightEmoji", "⭐"))
+    except Exception:
+        logging.exception("Highlight handler failed")
+
+
+# ---- Server stats channels (member count + Steam players online) ----
+async def _rename_if_changed(channel_id: int, name: str):
+    ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    if ch.name != name:
+        await ch.edit(name=name, reason="Stats update")
+        logging.info("Stats: renamed channel %s -> %r", channel_id, name)
+
+
+async def _update_stats_channels():
+    if not config.get("StatsEnabled"):
+        return
+    mid = int(config.get("StatsMemberChannelID", 0))
+    if mid:
+        ch = bot.get_channel(mid)
+        guild = ch.guild if ch else None
+        count = getattr(guild, "member_count", None)
+        if count:
+            await _rename_if_changed(mid, str(config.get("StatsMemberTemplate", "all-members-{count}")).format(count=count))
+    pid = int(config.get("StatsPlayersChannelID", 0))
+    appid = int(config.get("SteamAppID", 0))
+    if pid and appid:
+        url = f"https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid={appid}"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get(url) as r:
+                r.raise_for_status()
+                players = (await r.json()).get("response", {}).get("player_count")
+        if players is not None:
+            await _rename_if_changed(pid, str(config.get("StatsPlayersTemplate", "in-game-now-{count}")).format(count=players))
+
+
+async def _stats_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await _update_stats_channels()
+        except Exception:
+            logging.exception("Stats update failed")
+        # Discord allows 2 channel-name edits per 10 minutes — never poll faster.
+        await asyncio.sleep(max(600, int(config.get("StatsUpdateMin", 10)) * 60))
 
 
 # ---- Translate (message context menu) ----

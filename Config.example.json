@@ -100,5 +100,18 @@
     "AppCommandGuildID": 0,
     "FAQModel": "",
     "UtilityModel": "",
-    "TranslateModel": ""
+    "TranslateModel": "",
+    "WikiBaseURL": "",
+    "LoreModel": "",
+    "HighlightsChannelID": 0,
+    "HighlightEmoji": "⭐",
+    "HighlightThreshold": 3,
+    "HighlightImagesOnly": true,
+    "StatsEnabled": false,
+    "StatsMemberChannelID": 0,
+    "StatsMemberTemplate": "all-members-{count}",
+    "StatsPlayersChannelID": 0,
+    "StatsPlayersTemplate": "in-game-now-{count}",
+    "SteamAppID": 0,
+    "StatsUpdateMin": 10
 }
