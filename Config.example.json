@@ -98,5 +98,7 @@
     "FAQMaxAnswersPerScan": 3,
     "HoneypotNotifyChannelID": 0,
     "AppCommandGuildID": 0,
-    "FAQModel": ""
+    "FAQModel": "",
+    "UtilityModel": "",
+    "TranslateModel": ""
 }

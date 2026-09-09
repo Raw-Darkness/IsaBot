@@ -118,6 +118,12 @@ llm_client = AsyncOpenAI(
 )
 
 
+def utility_model() -> str | None:
+    """Cheaper model for mechanical tasks (summaries, prompt rewriting, FAQ, translation).
+    None = use the main model."""
+    return config.get("UtilityModel") or None
+
+
 class LLMResponseError(Exception):
     """Raised when the API returns 200 but no usable completion (e.g. provider error or content flag)."""
 
@@ -550,6 +556,7 @@ class ConversationManager:
                 [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
                 temperature=0.2,
                 max_tokens=300,
+                model=utility_model(),
             )
             cv.summary = (new_summary or "").strip()
             cv.turns = deque(
@@ -1005,8 +1012,10 @@ async def compile_sd_prompt(user_text: str) -> str:
 
     try:
         tok_budget = max(256, min(2000, max_chars // 3))
-        raw = await chat_async(msgs, temperature=0.0, max_tokens=tok_budget)
-        return (raw or "")[:max_chars]
+        raw = await chat_async(msgs, temperature=0.0, max_tokens=tok_budget, model=utility_model())
+        raw = (raw or "").strip().strip("`")
+        raw = re.sub(r"\((\d(?:\.\d+)?)\)\s*([^,()\n]+)", lambda m: f"({m.group(2).strip()}:{m.group(1)})", raw)
+        return raw[:max_chars]
     except Exception:
         logging.exception("LLM prompt compose failed; returning user text")
         return (user_text or "")[:max_chars]
@@ -1031,7 +1040,8 @@ async def refine_image_prompt(last: ImagePromptRecord, followup_text: str) -> di
     )
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     try:
-        raw = await chat_async(msgs, temperature=0.0, max_tokens=max(256, min(2000, max_chars // 3)))
+        raw = await chat_async(msgs, temperature=0.0, max_tokens=max(256, min(2000, max_chars // 3)), model=utility_model())
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip())
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("bad json")
@@ -2389,7 +2399,7 @@ async def faq_answer(question: str) -> str | None:
              {"role": "user", "content": f"Player question:\n{question}"}],
             temperature=0.3,
             max_tokens=400,
-            model=config.get("FAQModel") or None,
+            model=config.get("FAQModel") or utility_model(),
         )
     except Exception:
         logging.exception("FAQ: LLM call failed")
@@ -2443,6 +2453,65 @@ async def ask_command(interaction: discord.Interaction, question: str):
         logging.info("/ask: answered %r", question[:80])
     except Exception:
         logging.exception("/ask failed")
+
+
+# ---- Translate (message context menu) ----
+_LOCALE_LANG = {
+    "en-US": "English", "en-GB": "English", "de": "German", "sv-SE": "Swedish", "fr": "French",
+    "es-ES": "Spanish", "es-419": "Spanish (Latin America)", "pt-BR": "Portuguese (Brazil)",
+    "it": "Italian", "nl": "Dutch", "pl": "Polish", "ru": "Russian", "uk": "Ukrainian", "tr": "Turkish",
+    "ja": "Japanese", "ko": "Korean", "zh-CN": "Chinese (Simplified)", "zh-TW": "Chinese (Traditional)",
+    "cs": "Czech", "da": "Danish", "fi": "Finnish", "no": "Norwegian", "hu": "Hungarian", "ro": "Romanian",
+    "el": "Greek", "bg": "Bulgarian", "hr": "Croatian", "lt": "Lithuanian", "th": "Thai", "vi": "Vietnamese",
+    "id": "Indonesian", "hi": "Hindi", "ar": "Arabic", "he": "Hebrew",
+}
+
+
+def _locale_language(locale) -> str:
+    code = str(locale)
+    return _LOCALE_LANG.get(code) or _LOCALE_LANG.get(code.split("-")[0]) or f"the language for locale '{code}'"
+
+
+_translate_buckets: dict[int, TokenBucket] = {}
+
+
+@tree.context_menu(name="Translate")
+async def translate_message(interaction: discord.Interaction, message: discord.Message):
+    """Right-click a message → Apps → Translate: translation into the user's own Discord language, shown only to them."""
+    try:
+        text = (message.content or "").strip()
+        if not text:
+            await interaction.response.send_message("Nothing to translate in that message.", ephemeral=True)
+            return
+        bucket = _translate_buckets.setdefault(interaction.user.id, TokenBucket(capacity=5, refill_rate=5.0 / 60.0))
+        if not bucket.consume():
+            await interaction.response.send_message("Easy, darling — a few translations a minute is plenty.", ephemeral=True)
+            return
+        language = _locale_language(interaction.locale)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        system = (
+            f"Translate the user's Discord message into {language}. Output ONLY the translation — no commentary. "
+            "Preserve meaning, tone, slang, emoji, @mentions, links, and Discord formatting. "
+            f"If the message is already in {language}, reply with a one-line note in {language} saying so."
+        )
+        try:
+            translated = await chat_async(
+                [{"role": "system", "content": system}, {"role": "user", "content": text[:1800]}],
+                temperature=0.2,
+                max_tokens=700,
+                model=config.get("TranslateModel") or utility_model(),
+            )
+        except Exception:
+            logging.exception("Translate: LLM call failed")
+            translated = None
+        translated = (translated or "").strip()
+        if not translated:
+            await interaction.followup.send("I couldn't translate that one — try again in a moment.", ephemeral=True)
+            return
+        await interaction.followup.send(f"**{language}:**\n{translated[:1850]}", ephemeral=True)
+        logging.info("Translate: %s -> %s (%d chars)", interaction.user, language, len(text))
+    except Exception:
+        logging.exception("Translate failed")
 
 
 async def _sync_app_commands():
@@ -2580,6 +2649,7 @@ async def _summarize_channel(channel_name: str, messages: list[str]) -> str:
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             temperature=0.3,
             max_tokens=300,
+            model=utility_model(),
         )
         return (result or "").strip()
     except Exception:
@@ -2608,6 +2678,7 @@ async def _compile_digest(channel_summaries: list[tuple[str, str, int]]) -> str:
             [{"role": "system", "content": system}, {"role": "user", "content": combined}],
             temperature=0.3,
             max_tokens=1200,
+            model=utility_model(),
         )
         return (result or "").strip()
     except Exception:
