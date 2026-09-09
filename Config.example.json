@@ -95,5 +95,6 @@
     "QuestionsForumID": 0,
     "FAQAnswerDelayMin": 30,
     "FAQMaxThreadAgeHours": 24,
-    "FAQMaxAnswersPerScan": 3
+    "FAQMaxAnswersPerScan": 3,
+    "HoneypotNotifyChannelID": 0
 }

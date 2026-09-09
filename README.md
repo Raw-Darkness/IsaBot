@@ -118,6 +118,7 @@ To run it as a service on Linux (or WSL2 with systemd enabled), something like:
     "HoneypotExemptRoleIDs": roles exempt from the honeypot
     "HoneypotAction":        "kick" (softban: ban to wipe messages, then instantly unban) or "ban" (permanent)
     "HoneypotDeleteSeconds": how far back Discord wipes the offender's messages (default 600 = 10 min, max 604800)
+    "HoneypotNotifyChannelID": where honeypot removals are announced (0 = the mod log channel, or the mod channel if no log)
 
     "ChannelHistoryPath":    where channel conversation memory is stored
     "DMHistoryDir":          directory for per-user DM memory

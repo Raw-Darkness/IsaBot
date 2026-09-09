@@ -1481,6 +1481,22 @@ async def check_flood(message: discord.Message) -> bool:
 # =============================================================================
 # Honeypot
 # =============================================================================
+# Users the bot itself just kicked/banned, so the mod log can skip the
+# ban/unban/delete events those actions generate — one honeypot event
+# should produce exactly one log entry.
+_bot_actioned: dict[int, float] = {}
+
+
+def _recently_actioned(user_id: int | None = None, window: float = 300.0) -> bool:
+    now = time.time()
+    for uid, ts in list(_bot_actioned.items()):
+        if now - ts > window:
+            del _bot_actioned[uid]
+    if user_id is None:
+        return bool(_bot_actioned)
+    return user_id in _bot_actioned
+
+
 # Pre-written removal announcements — no LLM call needed for a one-liner.
 # Override with a "HoneypotQuips" list in the config ({name} = offender).
 _DEFAULT_QUIPS = [
@@ -1537,6 +1553,7 @@ async def honeypot_guard(message: discord.Message) -> bool:
         # hasn't surfaced yet and ones posted mid-cleanup, which a manual purge
         # misses. With HoneypotAction "kick" (default) the ban is lifted right
         # away ("softban"), so the user can rejoin like after a normal kick.
+        _bot_actioned[member.id] = time.time()
         try:
             await guild.ban(member, reason=reason, delete_message_seconds=delete_seconds)
             if action != "ban":
@@ -1591,22 +1608,28 @@ async def honeypot_guard(message: discord.Message) -> bool:
         )
 
         try:
-            mod_ch = None
-            if MOD_CHANNEL_ID:
-                mod_ch = bot.get_channel(MOD_CHANNEL_ID) or await bot.fetch_channel(MOD_CHANNEL_ID)
-            if mod_ch:
+            notify_id = (
+                int(config.get("HoneypotNotifyChannelID", 0))
+                or int(config.get("ModLogChannelID", 0))
+                or MOD_CHANNEL_ID
+            )
+            notify_ch = None
+            if notify_id:
+                notify_ch = bot.get_channel(notify_id) or await bot.fetch_channel(notify_id)
+            if notify_ch:
                 quip = pick_mod_quip(member.display_name)
                 status = removal_word if removed_ok else "NOT removed (action failed)"
                 if total_deleted < 0:
                     cleanup_line = f"🧹 Discord wiped their messages from the last {delete_seconds // 60} min."
                 else:
                     cleanup_line = f"🧹 Deleted ~{total_deleted} message(s) from the last {delete_seconds // 60} min."
-                msg = (
-                    f"👢 **{member.display_name}** was {status} (honeypot).\n"
-                    f"{cleanup_line}\n"
-                    f"{quip}"
+                embed = discord.Embed(
+                    title=f"👢 Honeypot: {member.display_name} {status}",
+                    description=f"{cleanup_line}\n{quip}",
+                    color=0x992D22 if removed_ok else 0xE67E22,
                 )
-                await safe_send(mod_ch, msg)
+                embed.add_field(name="User", value=f"{member} ({member.id})")
+                await notify_ch.send(embed=embed)
         except Exception:
             logging.exception("Failed to notify mods")
 
@@ -1647,6 +1670,10 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         msg = payload.cached_message
         if msg is not None and msg.author.bot:
             return
+        if payload.channel_id == TRAP_CHANNEL_ID:
+            return  # honeypot trigger message — covered by the honeypot entry
+        if msg is not None and _recently_actioned(msg.author.id):
+            return  # wiped by our own ban — covered by the honeypot entry
         embed = discord.Embed(title="Message deleted", color=0xE74C3C)
         if msg is not None:
             embed.add_field(name="Author", value=f"{msg.author} ({msg.author.id})", inline=False)
@@ -1668,6 +1695,8 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
     try:
         if payload.guild_id is None or payload.channel_id == _modlog_channel_id():
             return
+        if _recently_actioned():
+            return  # purge from our own honeypot action
         embed = discord.Embed(
             title="Bulk delete",
             description=f"{len(payload.message_ids)} messages removed in <#{payload.channel_id}> (e.g. a purge).",
@@ -1715,6 +1744,8 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
 @bot.event
 async def on_member_ban(guild: discord.Guild, user):
     try:
+        if _recently_actioned(user.id):
+            return  # our own honeypot action — already logged
         embed = discord.Embed(title="Member banned", color=0x992D22)
         embed.add_field(name="User", value=f"{user} ({user.id})")
         await _modlog_send(embed)
@@ -1725,6 +1756,8 @@ async def on_member_ban(guild: discord.Guild, user):
 @bot.event
 async def on_member_unban(guild: discord.Guild, user):
     try:
+        if _recently_actioned(user.id):
+            return  # softban lift — not a real unban
         embed = discord.Embed(title="Member unbanned", color=0x2ECC71)
         embed.add_field(name="User", value=f"{user} ({user.id})")
         await _modlog_send(embed)
