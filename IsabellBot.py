@@ -2626,13 +2626,23 @@ async def _draw_style_autocomplete(interaction: discord.Interaction, current: st
 
 
 # ---- Highlights (starboard) ----
+def _norm_emoji(e) -> str:
+    return str(e).replace("\ufe0f", "")
+
+
+def _highlight_emojis() -> set[str]:
+    raw = config.get("HighlightEmojis") or [config.get("HighlightEmoji", "⭐")]
+    return {_norm_emoji(e) for e in raw}
+
+
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
         hl_id = int(config.get("HighlightsChannelID", 0))
         if not hl_id or payload.guild_id is None or payload.channel_id == hl_id:
             return
-        if str(payload.emoji) != config.get("HighlightEmoji", "⭐"):
+        accepted = _highlight_emojis()
+        if _norm_emoji(payload.emoji) not in accepted:
             return
         channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
         msg = await channel.fetch_message(payload.message_id)
@@ -2644,10 +2654,14 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             return
         if msg.author.bot and not is_bot_image:
             return
-        count = 0
+        # Unique voters across all accepted reactions (⭐ + ❤️ from one person = 1 vote).
+        voters: set[int] = set()
         for reaction in msg.reactions:
-            if str(reaction.emoji) == config.get("HighlightEmoji", "⭐"):
-                count = reaction.count
+            if _norm_emoji(reaction.emoji) in accepted:
+                async for u in reaction.users():
+                    if u.id != bot.user.id:
+                        voters.add(u.id)
+        count = len(voters)
         if count < int(config.get("HighlightThreshold", 3)):
             return
         db = get_db()
@@ -2677,7 +2691,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             embed.set_thumbnail(url=msg.author.display_avatar.url)
         embed.add_field(name="Source", value=f"[jump to message]({jump}) in <#{payload.channel_id}>")
         await hl.send(embed=embed, files=files)
-        logging.info("Highlight: message %s (%d %s)", msg.id, count, config.get("HighlightEmoji", "⭐"))
+        logging.info("Highlight: message %s (%d voters)", msg.id, count)
     except Exception:
         logging.exception("Highlight handler failed")
 

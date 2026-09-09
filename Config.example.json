@@ -104,7 +104,6 @@
     "WikiBaseURL": "",
     "LoreModel": "",
     "HighlightsChannelID": 0,
-    "HighlightEmoji": "⭐",
     "HighlightThreshold": 3,
     "HighlightImagesOnly": true,
     "StatsEnabled": false,
@@ -113,5 +112,9 @@
     "StatsPlayersChannelID": 0,
     "StatsPlayersTemplate": "in-game-now-{count}",
     "SteamAppID": 0,
-    "StatsUpdateMin": 10
+    "StatsUpdateMin": 10,
+    "HighlightEmojis": [
+        "⭐",
+        "❤️"
+    ]
 }
