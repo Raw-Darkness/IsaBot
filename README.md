@@ -122,6 +122,8 @@ To run it as a service on Linux (or WSL2 with systemd enabled), something like:
     "FAQAnswerDelayMin":     minutes a thread must sit unanswered before the bot replies
     "FAQMaxThreadAgeHours":  never answer threads older than this
     "FAQMaxAnswersPerScan":  cap per 10-minute scan (avoids bursts after downtime)
+    "FAQRetrievalMinTokens": once the FAQ file grows past this, only the best-matching entries are sent instead of the whole file
+    "FAQRetrievalMaxTokens": budget for those selected entries
     "UtilityModel":          cheaper model for mechanical tasks — memory summaries, image-prompt rewriting, FAQ, translation (empty = main model). Pick one that does not refuse your server's content; the main model stays for persona chat
     "FAQModel" / "TranslateModel" / "LoreModel": optional per-task overrides of UtilityModel
     "WikiBaseURL":           base URL of a MediaWiki wiki for /wiki (empty = disabled)

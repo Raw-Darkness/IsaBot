@@ -171,11 +171,31 @@ def _build_lore_index():
         for t in terms:
             freq[t] = freq.get(t, 0) + 1
     limit = max(2, int(len(chunks) * 0.4))  # a term in >40% of chunks discriminates nothing
-    _LORE_CHUNKS = [(t, x, {k for k in terms if freq[k] <= limit}) for t, x, terms in per_chunk]
+    # Weight by rarity: a name unique to one section is a far stronger signal
+    # than one sprinkled across several.
+    _LORE_CHUNKS = [
+        (t, x, {k: 1.0 / freq[k] for k in terms if freq[k] <= limit}) for t, x, terms in per_chunk
+    ]
     logging.info(
         "Lore index: %d chunks, %d distinct terms",
-        len(_LORE_CHUNKS), len({k for _, _, s in _LORE_CHUNKS for k in s}),
+        len(_LORE_CHUNKS), len({k for _, _, s in _LORE_CHUNKS for k in s}),  # noqa: E501
     )
+
+
+def _query_words(q: str) -> set[str]:
+    """Words from a query, plus singular forms so 'Vorgath's' and 'drakes' still match."""
+    words = set(re.findall(r"[a-z']+", q))
+    extra = set()
+    for w in words:
+        base = re.sub(r"'s$", "", w)
+        if base != w:
+            extra.add(base)
+        for stem in (base, w):
+            if stem.endswith("es") and len(stem) > 5:
+                extra.add(stem[:-2])
+            if stem.endswith("s") and len(stem) > 4:
+                extra.add(stem[:-1])
+    return words | extra
 
 
 def retrieve_lore(query: str) -> str:
@@ -185,12 +205,11 @@ def retrieve_lore(query: str) -> str:
     q = (query or "").lower()
     if len(q) < 3:
         return ""
-    words = set(re.findall(r"[a-z']+", q))
+    words = _query_words(q)
     scored = []
     for title, text, terms in _LORE_CHUNKS:
-        hits = sum(1 for t in terms if (t in words) if " " not in t) + sum(
-            1 for t in terms if " " in t and t in q
-        )
+        hits = sum(w for t, w in terms.items() if " " not in t and t in words)
+        hits += sum(w for t, w in terms.items() if " " in t and t in q)
         if hits:
             scored.append((hits, title, text))
     if not scored:
@@ -203,7 +222,7 @@ def retrieve_lore(query: str) -> str:
         if cost > budget:
             continue
         picked.append(text)
-        titles.append(f"{title}({hits})")
+        titles.append(f"{title}({hits:.2f})")
         budget -= cost
     if picked:
         logging.info("Lore retrieval: %s", ", ".join(titles))
@@ -1220,9 +1239,24 @@ def is_exact_trigger(text: str) -> bool:
     return any(k in t for k in EXACT_TRIGGERS)
 
 
+# Users often send bare SD prompt fragments as follow-ups — "(Translucent skin:1.6)",
+# "Labia spreading:1.3" — with no trigger word at all. Measured against real traffic,
+# these were the bulk of the requests keyword matching missed.
+_SD_WEIGHT_RE = re.compile(r"\([^()\n]{2,60}:\s*\d(?:\.\d+)?\)|\b[a-z][a-z ]{2,40}:\s*\d\.\d\b", re.IGNORECASE)
+
+
+def looks_like_sd_syntax(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or "http://" in t or "https://" in t:
+        return False
+    return bool(_SD_WEIGHT_RE.search(t))
+
+
 def looks_like_image_request(text: str) -> bool:
     t = (text or "").strip()
-    return bool(_IMAGE_TRIGGER_RE.search(t)) or t.lower().startswith(("img:", "image:", "art:"))
+    if bool(_IMAGE_TRIGGER_RE.search(t)) or t.lower().startswith(("img:", "image:", "art:")):
+        return True
+    return looks_like_sd_syntax(t)
 
 
 def _looks_like_tag_prompt(text: str) -> bool:
@@ -1941,7 +1975,12 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
         cm.add_user(ch_id, is_dm, message.author.id, message.author.display_name, message.content, message.id)
         await cm.maybe_compress(ch_id)
 
-        system_prefix = build_system_prefix(text_override if text_override is not None else (message.content or ""))
+        # Build the retrieval query from the recent exchange, not just this line —
+        # otherwise "tell me more about him" retrieves nothing.
+        this_text = text_override if text_override is not None else (message.content or "")
+        recent = [t for r, t in list(cm.get(ch_id).turns)[-4:] if r == "user"]
+        retrieval_query = " ".join(recent[-2:] + [this_text])[-1200:]
+        system_prefix = build_system_prefix(retrieval_query)
         msgs = cm.build_messages(ch_id, system_prefix=system_prefix)
 
         if text_override is not None and msgs and msgs[-1]["role"] == "user":
@@ -2522,15 +2561,66 @@ async def on_message(message: discord.Message):
 # Community-first: a question thread only gets a bot answer after it has sat
 # without any human reply for FAQAnswerDelayMin minutes. Answers are grounded
 # strictly in the FAQ file — no coverage, no answer.
+_FAQ_CACHE: dict[str, Any] = {"path": None, "mtime": 0.0, "text": "", "entries": []}
+
+
+def _load_faq() -> tuple[str, list[tuple[str, dict[str, float]]]]:
+    """FAQ text plus per-entry term weights, reparsed only when the file changes."""
+    path = config.get("FAQPath", "game_faq.txt")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return "", []
+    if _FAQ_CACHE["path"] == path and _FAQ_CACHE["mtime"] == mtime:
+        return _FAQ_CACHE["text"], _FAQ_CACHE["entries"]
+    text = _read_text(path)
+    parsed, freq = [], {}
+    for block in re.split(r"\n\s*\n", text):
+        block = block.strip()
+        if not block.lower().startswith("q:"):
+            continue
+        words = set(re.findall(r"[a-z]{3,}", block.lower()))
+        parsed.append((block, words))
+        for w in words:
+            freq[w] = freq.get(w, 0) + 1
+    entries = [(b, {w: 1.0 / freq[w] for w in words}) for b, words in parsed]
+    _FAQ_CACHE.update(path=path, mtime=mtime, text=text, entries=entries)
+    logging.info("FAQ loaded: %d entries, ~%d tokens", len(entries), len(text) / 3.6)
+    return text, entries
+
+
+def retrieve_faq(question: str) -> str:
+    """The slice of the FAQ worth showing for this question.
+
+    While the whole file still fits comfortably it is sent intact — retrieval can
+    only lose recall, and there is nothing to gain. Once the FAQ grows past
+    FAQRetrievalMinTokens, only the best-matching entries are sent.
+    """
+    text, entries = _load_faq()
+    if not text:
+        return ""
+    if len(text) / 3.6 <= float(config.get("FAQRetrievalMinTokens", 8000)) or not entries:
+        return text
+    qwords = _query_words(question.lower())
+    scored = [(sum(w for t, w in terms.items() if t in qwords), b) for b, terms in entries]
+    scored = sorted((s for s in scored if s[0] > 0), key=lambda x: -x[0])
+    if not scored:
+        return text
+    budget = float(config.get("FAQRetrievalMaxTokens", 2500))
+    picked = []
+    for _, block in scored:
+        cost = len(block) / 3.6
+        if cost > budget:
+            break
+        picked.append(block)
+        budget -= cost
+    logging.info("FAQ retrieval: %d/%d entries", len(picked), len(entries))
+    return "\n\n".join(picked) if picked else text
+
+
 async def faq_answer(question: str) -> str | None:
     """Answer a question strictly from the FAQ file; None when it isn't covered."""
-    faq_path = config.get("FAQPath", "game_faq.txt")
-    try:
-        with open(faq_path, "r", encoding="utf-8") as f:
-            faq = f.read().strip()
-    except Exception:
-        logging.exception("FAQ: cannot read %s", faq_path)
-        return None
+    faq = retrieve_faq(question)
     if not faq:
         return None
 

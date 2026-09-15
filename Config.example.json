@@ -120,5 +120,7 @@
     "LoreChatPath": "",
     "LoreRetrievalEnabled": true,
     "LoreRetrievalMaxChunks": 2,
-    "LoreRetrievalMaxTokens": 1400
+    "LoreRetrievalMaxTokens": 1400,
+    "FAQRetrievalMinTokens": 8000,
+    "FAQRetrievalMaxTokens": 2500
 }
