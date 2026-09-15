@@ -75,15 +75,42 @@ CHANNEL_HISTORY_PATH = config.get("ChannelHistoryPath", "channel_history.json")
 DM_HISTORY_DIR = config.get("DMHistoryDir", "dm_history")
 
 # Lore: loaded as plain text, injected into every system prompt
-LORE_PATH = config.get("LorePath", "world_lore.txt")
-LORE_CONTEXT = ""
-if os.path.exists(LORE_PATH):
+# Two lore texts: the full reference (used by /lore, where depth matters) and a
+# compact one injected into every chat turn. The full file is ~9k tokens — sending
+# it on every message dominated the API bill, so chat gets the condensed version.
+LORE_CONTEXT = ""       # full reference
+LORE_CHAT_CONTEXT = ""  # compact, sent with every chat message
+_lore_mtimes: dict[str, float] = {}
+
+
+def _lore_paths() -> tuple[str, str]:
+    full = config.get("LorePath", "world_lore.txt")
+    return full, (config.get("LoreChatPath") or full)
+
+
+def _read_text(path: str) -> str:
     try:
-        with open(LORE_PATH, "r", encoding="utf-8") as f:
-            LORE_CONTEXT = f.read().strip()
-        logging.info("Loaded lore from %s (%d chars)", LORE_PATH, len(LORE_CONTEXT))
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
     except Exception:
-        logging.exception("Failed to load lore file")
+        logging.exception("Failed to read lore file %s", path)
+        return ""
+
+
+def load_lore():
+    """(Re)load both lore files. Safe to call repeatedly."""
+    global LORE_CONTEXT, LORE_CHAT_CONTEXT, _lore_mtimes
+    full_path, chat_path = _lore_paths()
+    LORE_CONTEXT = _read_text(full_path) if os.path.exists(full_path) else ""
+    LORE_CHAT_CONTEXT = _read_text(chat_path) if os.path.exists(chat_path) else LORE_CONTEXT
+    _lore_mtimes = {p: os.path.getmtime(p) for p in {full_path, chat_path} if os.path.exists(p)}
+    logging.info(
+        "Loaded lore: full=%d chars (%s), chat=%d chars (%s)",
+        len(LORE_CONTEXT), full_path, len(LORE_CHAT_CONTEXT), chat_path,
+    )
+
+
+load_lore()
 
 
 def _reload_derived_config():
@@ -92,6 +119,8 @@ def _reload_derived_config():
     global MOD_CHANNEL_ID, MOD_ROLE_ID, TRAP_CHANNEL_ID, EXEMPT_ROLE_IDS
     IGNORED_USERS = set(config.get("IgnoredUsers", []))
     IGNORED_WORDS = {w.lower() for w in config.get("IgnoredWords", [])}
+    if "load_lore" in globals():
+        load_lore()
     # Owner ID for DM commands and summary delivery (0 = disabled)
     OWNER_ID = int(config.get("SummaryOwnerID", 0))
     # Mod alert channel, mod role, honeypot channel + exempt roles (0/empty = feature disabled)
@@ -1119,8 +1148,8 @@ def build_system_prefix() -> str:
     parts = [f"You are {name}."]
     if persona:
         parts.append(f"\nStay in character as {name}:\n{persona}")
-    if LORE_CONTEXT:
-        parts.append(f"\n\nWorld knowledge (use this to answer questions about the world):\n{LORE_CONTEXT}")
+    if LORE_CHAT_CONTEXT:
+        parts.append(f"\n\nWorld knowledge (use this to answer questions about the world):\n{LORE_CHAT_CONTEXT}")
     return "\n".join(parts)
 
 
@@ -3081,6 +3110,13 @@ async def _config_watch_loop():
                 config = load_config()
                 _reload_derived_config()
                 logging.info("Config hot-reloaded (file changed)")
+            else:
+                # Lore files are edited far more often than the config itself.
+                for path, was in list(_lore_mtimes.items()):
+                    if os.path.exists(path) and os.path.getmtime(path) > was:
+                        load_lore()
+                        logging.info("Lore hot-reloaded (%s changed)", path)
+                        break
         except FileNotFoundError:
             pass
         except Exception:

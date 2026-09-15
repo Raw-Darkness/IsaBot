@@ -70,7 +70,8 @@ To run it as a service on Linux (or WSL2 with systemd enabled), something like:
 
     "Name":                  the bot's name (also used for name-mention detection)
     "Personality":           system-prompt personality. Keep it tight — it is sent with every message
-    "LorePath":              optional plain-text file with world/lore knowledge added to the system prompt
+    "LorePath":              optional plain-text file with world/lore knowledge (used in full by /lore)
+    "LoreChatPath":          compact lore injected into every chat message (empty = use the full file). A large lore file sent on every turn dominates API cost; keep this one short. Both files hot-reload when edited.
 
     "AllowedChannels":       channel IDs the bot chats in (DMs always work)
     "IgnoredUsers":          user IDs to ignore (e.g. other bots)
