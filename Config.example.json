@@ -117,5 +117,8 @@
         "⭐",
         "❤️"
     ],
-    "LoreChatPath": ""
+    "LoreChatPath": "",
+    "LoreRetrievalEnabled": true,
+    "LoreRetrievalMaxChunks": 2,
+    "LoreRetrievalMaxTokens": 1400
 }

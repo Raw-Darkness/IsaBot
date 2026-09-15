@@ -97,6 +97,119 @@ def _read_text(path: str) -> str:
         return ""
 
 
+# Retrieval index over the FULL lore: (title, text, matching terms).
+# Chat carries only the compact lore; when a message names something from the
+# world, the matching section is appended just for that call.
+_LORE_CHUNKS: list[tuple[str, str, set[str]]] = []
+
+_LORE_STOP = {
+    "the","this","that","they","there","when","what","where","while","their","these","those","some",
+    "most","many","each","every","after","before","above","below","during","because","her","his","its",
+    "she","and","but","for","not","with","from","into","over","under","been","were","have","has","had",
+    "only","more","less","than","then","them","who","how","why","all","any","one","two","new","old",
+    "human","humans","women","woman","men","man","people","years","year","time","first","last","other",
+    "small","large","black","white","red","blue","green","background","current","player","game",
+}
+
+
+def _split_lore(text: str) -> list[tuple[str, str]]:
+    """Split the lore into retrievable chunks: ### subsections where present, else ## sections."""
+    chunks: list[tuple[str, str]] = []
+    for section in re.split(r"\n(?=## )", text):
+        section = section.strip()
+        if not section:
+            continue
+        title = section.split("\n", 1)[0].lstrip("# ").strip()
+        subs = re.split(r"\n(?=### )", section)
+        if len(subs) > 1:
+            if len(subs[0].strip()) > 200:
+                chunks.append((title, subs[0].strip()))
+            for sub in subs[1:]:
+                sub = sub.strip()
+                sub_title = sub.split("\n", 1)[0].lstrip("# ").strip()
+                chunks.append((f"{title} / {sub_title}", sub))
+        else:
+            chunks.append((title, section))
+    return chunks
+
+
+def _lore_terms(text: str) -> set[str]:
+    """Proper nouns in a chunk — the names a user might reference.
+
+    A single capitalised word only counts when it appears mid-sentence; a capital
+    after a period, bullet or line break is just sentence case, not a name.
+    """
+    terms: set[str] = set()
+    # Headings ("### Aeron ...") and bolded labels ("- **Iron Creed:** ...") are
+    # where this lore declares its names, so take every capitalised word there.
+    for line in re.findall(r"^#{1,4}[ ]*(.+)$", text, re.M) + re.findall(r"\*\*([^*\n]{2,48}?):?\*\*", text):
+        terms |= {w.lower() for w in re.findall(r"\b[A-Z][a-z']{3,}\b", line)}
+        terms |= {m.lower() for m in re.findall(r"\b[A-Z][a-z']+(?:[ ][A-Z][a-z']+)+\b", line)}
+    # Multi-word capitalised phrases anywhere, plus single words capitalised
+    # mid-sentence (a capital after a period or line break is just sentence case).
+    terms |= {m.lower() for m in re.findall(r"\b[A-Z][a-z']+(?:[ ][A-Z][a-z']+)+\b", text)}
+    terms |= {m.lower() for m in re.findall(r"(?<=[a-z,;)] )([A-Z][a-z']{3,})\b", text)}
+    return {t for t in terms if t not in _LORE_STOP}
+
+
+def _build_lore_index():
+    """Index the full lore, dropping terms too common to be a useful signal."""
+    global _LORE_CHUNKS
+    chunks = _split_lore(LORE_CONTEXT) if LORE_CONTEXT else []
+    if not chunks:
+        _LORE_CHUNKS = []
+        return
+    # A real proper noun is never written lowercase in the source text. This drops
+    # sentence-start capitals ("Female", "Bound", "Horse") that would otherwise
+    # match ordinary roleplay and pull in lore nobody asked for.
+    lowercase_words = set(re.findall(r"\b[a-z][a-z']{2,}\b", LORE_CONTEXT))
+    freq: dict[str, int] = {}
+    per_chunk = []
+    for title, text in chunks:
+        terms = {t for t in _lore_terms(text) if " " in t or t not in lowercase_words}
+        per_chunk.append((title, text, terms))
+        for t in terms:
+            freq[t] = freq.get(t, 0) + 1
+    limit = max(2, int(len(chunks) * 0.4))  # a term in >40% of chunks discriminates nothing
+    _LORE_CHUNKS = [(t, x, {k for k in terms if freq[k] <= limit}) for t, x, terms in per_chunk]
+    logging.info(
+        "Lore index: %d chunks, %d distinct terms",
+        len(_LORE_CHUNKS), len({k for _, _, s in _LORE_CHUNKS for k in s}),
+    )
+
+
+def retrieve_lore(query: str) -> str:
+    """Return full-lore sections matching the query, within the configured budget."""
+    if not config.get("LoreRetrievalEnabled", True) or not _LORE_CHUNKS:
+        return ""
+    q = (query or "").lower()
+    if len(q) < 3:
+        return ""
+    words = set(re.findall(r"[a-z']+", q))
+    scored = []
+    for title, text, terms in _LORE_CHUNKS:
+        hits = sum(1 for t in terms if (t in words) if " " not in t) + sum(
+            1 for t in terms if " " in t and t in q
+        )
+        if hits:
+            scored.append((hits, title, text))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: (-x[0], len(x[2])))
+    budget = float(config.get("LoreRetrievalMaxTokens", 1400))
+    picked, titles = [], []
+    for hits, title, text in scored[: int(config.get("LoreRetrievalMaxChunks", 2))]:
+        cost = len(text) / 3.6
+        if cost > budget:
+            continue
+        picked.append(text)
+        titles.append(f"{title}({hits})")
+        budget -= cost
+    if picked:
+        logging.info("Lore retrieval: %s", ", ".join(titles))
+    return "\n\n".join(picked)
+
+
 def load_lore():
     """(Re)load both lore files. Safe to call repeatedly."""
     global LORE_CONTEXT, LORE_CHAT_CONTEXT, _lore_mtimes
@@ -108,6 +221,7 @@ def load_lore():
         "Loaded lore: full=%d chars (%s), chat=%d chars (%s)",
         len(LORE_CONTEXT), full_path, len(LORE_CHAT_CONTEXT), chat_path,
     )
+    _build_lore_index()
 
 
 load_lore()
@@ -1141,7 +1255,7 @@ def should_route_to_image_followup(message: discord.Message) -> bool:
 # =============================================================================
 # System Prompt
 # =============================================================================
-def build_system_prefix() -> str:
+def build_system_prefix(query: str = "") -> str:
     name = config.get("Name", "Assistant")
     persona = (config.get("Personality") or "").strip()
 
@@ -1150,6 +1264,9 @@ def build_system_prefix() -> str:
         parts.append(f"\nStay in character as {name}:\n{persona}")
     if LORE_CHAT_CONTEXT:
         parts.append(f"\n\nWorld knowledge (use this to answer questions about the world):\n{LORE_CHAT_CONTEXT}")
+    detail = retrieve_lore(query)
+    if detail:
+        parts.append(f"\n\nRelevant lore detail for this message:\n{detail}")
     return "\n".join(parts)
 
 
@@ -1824,7 +1941,7 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
         cm.add_user(ch_id, is_dm, message.author.id, message.author.display_name, message.content, message.id)
         await cm.maybe_compress(ch_id)
 
-        system_prefix = build_system_prefix()
+        system_prefix = build_system_prefix(text_override if text_override is not None else (message.content or ""))
         msgs = cm.build_messages(ch_id, system_prefix=system_prefix)
 
         if text_override is not None and msgs and msgs[-1]["role"] == "user":
