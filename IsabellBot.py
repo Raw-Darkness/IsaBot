@@ -291,7 +291,7 @@ class LLMResponseError(Exception):
     """Raised when the API returns 200 but no usable completion (e.g. provider error or content flag)."""
 
 
-async def chat_async(messages: list[dict[str, str]], _retries: int = 3, **kwargs) -> str:
+async def chat_async(messages: list[dict[str, str]], _retries: int = 3, return_message: bool = False, **kwargs):
     """Run a chat completion with retry + exponential backoff."""
     kwargs.pop("reasoning", None)
     model = kwargs.pop("model", None) or config["OpenaiModel"]
@@ -318,7 +318,8 @@ async def chat_async(messages: list[dict[str, str]], _retries: int = 3, **kwargs
                 # Provider/moderation errors are deterministic — retrying wastes time.
                 raise LLMResponseError(str(err_detail or "no choices returned"))
 
-            return resp.choices[0].message.content
+            msg = resp.choices[0].message
+            return msg if return_message else msg.content
         except LLMResponseError:
             # Don't retry — same request will be rejected identically.
             raise
@@ -1220,6 +1221,79 @@ async def refine_image_prompt(last: ImagePromptRecord, followup_text: str) -> di
 
 
 # =============================================================================
+# Image tool (model-decided drawing)
+# =============================================================================
+# Keyword matching catches explicit requests; this catches the rest — phrasings
+# in any language, and "show me what she'd look like". The model also writes the
+# SD prompt itself using the conversation, replacing the separate compose call.
+IMAGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "generate_image",
+        "description": (
+            "Draw and post a picture. Call this ONLY when the user is asking to be shown "
+            "or drawn something. Never call it for ordinary conversation, roleplay narration, "
+            "or when the user is merely describing or commenting on something visual."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "A detailed comma-separated Stable Diffusion prompt for the image the user "
+                        "wants, using the conversation for any context they left implicit."
+                    ),
+                },
+                "aspect": {"type": "string", "enum": ["square", "portrait", "landscape"]},
+            },
+            "required": ["prompt"],
+        },
+    },
+}
+
+
+def image_tools_for(message: discord.Message):
+    """The tool list for this message, or None when model-decided drawing is off."""
+    if not config.get("ImageToolEnabled", False):
+        return None
+    if not _image_channel_allowed(message.channel):
+        return None
+    return [IMAGE_TOOL]
+
+
+async def run_tool_image(message: discord.Message, args: dict) -> bool:
+    """Act on a generate_image tool call. Returns True if a job was started."""
+    prompt = (args.get("prompt") or "").strip()
+    if not prompt:
+        return False
+    if not get_user_bucket(message.author.id).consume():
+        await safe_send(message.channel, "You're requesting images too fast — slow down a bit.")
+        return True
+    width = height = None
+    aspect = (args.get("aspect") or "").lower()
+    if aspect in ("portrait", "landscape"):
+        size = config.get("SDPortraitSize" if aspect == "portrait" else "SDLandscapeSize") or []
+        if len(size) == 2:
+            width, height = int(size[0]), int(size[1])
+    status = await safe_send(message.channel, "Hang on while I sketch that for you…")
+    logging.info("Image tool fired | ch=%s | prompt=%r", channel_key(message), prompt[:90])
+    asyncio.create_task(run_image_job(
+        message.channel,
+        ch_id=channel_key(message),
+        user_prompt=message.content or "",
+        sd_prompt=prompt[: int(config.get("ImagePromptMaxChars", 1600))],
+        neg=config.get("SDNegativePrompt", "(lowres, blurry, deformed)"),
+        width=width,
+        height=height,
+        requested_by=message.author.display_name,
+        trigger_message_id=message.id,
+        status_msg=status,
+    ))
+    return True
+
+
+# =============================================================================
 # Heuristics
 # =============================================================================
 _IMAGE_TRIGGER_RE = re.compile(
@@ -1992,11 +2066,32 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
         logging.info("TEXT -> LLM | ch=%s | msg_id=%s", ch_id, message.id)
         freq_pen = float(config.get("FrequencyPenalty", 0.3))
         pres_pen = float(config.get("PresencePenalty", 0.3))
+        tools = image_tools_for(message)
         async with message.channel.typing():
-            reply = await chat_async(
+            result = await chat_async(
                 msgs, temperature=0.6, max_tokens=600,
                 frequency_penalty=freq_pen, presence_penalty=pres_pen,
+                **({"tools": tools, "return_message": True} if tools else {}),
             )
+
+        reply = result
+        if tools:
+            calls = getattr(result, "tool_calls", None) or []
+            for call in calls:
+                if getattr(call.function, "name", "") != "generate_image":
+                    continue
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except Exception:
+                    logging.exception("Image tool: bad arguments %r", call.function.arguments)
+                    break
+                said = (getattr(result, "content", "") or "").strip()
+                if said:
+                    cm.add_assistant(ch_id, said)
+                    await safe_send(message.channel, said)
+                if await run_tool_image(message, args):
+                    return
+            reply = getattr(result, "content", None)
 
         if not (reply or "").strip():
             # Model returned nothing (e.g. provider refusal). Don't store or

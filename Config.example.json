@@ -122,5 +122,6 @@
     "LoreRetrievalMaxChunks": 2,
     "LoreRetrievalMaxTokens": 1400,
     "FAQRetrievalMinTokens": 8000,
-    "FAQRetrievalMaxTokens": 2500
+    "FAQRetrievalMaxTokens": 2500,
+    "ImageToolEnabled": false
 }
