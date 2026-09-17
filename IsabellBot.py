@@ -2966,6 +2966,17 @@ def _highlight_emojis() -> set[str]:
     return {_norm_emoji(e) for e in raw}
 
 
+def _emoji_matches(e, accepted: set[str]) -> bool:
+    """Unicode emoji match by character; custom server emoji also match by name."""
+    if _norm_emoji(e) in accepted:
+        return True
+    name = getattr(e, "name", None)
+    return bool(name) and _norm_emoji(name) in accepted
+
+
+_highlight_in_flight: set[int] = set()
+
+
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
@@ -2973,7 +2984,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         if not hl_id or payload.guild_id is None or payload.channel_id == hl_id:
             return
         accepted = _highlight_emojis()
-        if _norm_emoji(payload.emoji) not in accepted:
+        if not _emoji_matches(payload.emoji, accepted):
             return
         channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
         msg = await channel.fetch_message(payload.message_id)
@@ -2988,19 +2999,31 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         # Unique voters across all accepted reactions (⭐ + ❤️ from one person = 1 vote).
         voters: set[int] = set()
         for reaction in msg.reactions:
-            if _norm_emoji(reaction.emoji) in accepted:
+            if _emoji_matches(reaction.emoji, accepted):
                 async for u in reaction.users():
                     if u.id != bot.user.id:
                         voters.add(u.id)
         count = len(voters)
         if count < int(config.get("HighlightThreshold", 3)):
             return
+        if msg.id in _highlight_in_flight:
+            return
         db = get_db()
         if db.execute("SELECT 1 FROM highlights WHERE message_id = ?", (msg.id,)).fetchone():
             return
-        db.execute("INSERT INTO highlights (message_id, ts) VALUES (?, ?)", (msg.id, time.time()))
-        db.commit()
+        _highlight_in_flight.add(msg.id)
+        try:
+            await _post_highlight(payload, msg, hl_id, count, is_bot_image)
+        finally:
+            _highlight_in_flight.discard(msg.id)
+    except Exception:
+        logging.exception("Highlight handler failed")
 
+
+async def _post_highlight(payload, msg, hl_id: int, count: int, is_bot_image: bool):
+    """Post a highlight, and only record it once the post actually succeeded —
+    a failed post must stay eligible, or the image is silently lost for good."""
+    try:
         hl = bot.get_channel(hl_id) or await bot.fetch_channel(hl_id)
         jump = f"https://discord.com/channels/{payload.guild_id}/{payload.channel_id}/{payload.message_id}"
         embed = discord.Embed(color=0xF1C40F)
@@ -3022,9 +3045,17 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             embed.set_thumbnail(url=msg.author.display_avatar.url)
         embed.add_field(name="Source", value=f"[jump to message]({jump}) in <#{payload.channel_id}>")
         await hl.send(embed=embed, files=files)
-        logging.info("Highlight: message %s (%d voters)", msg.id, count)
-    except Exception:
-        logging.exception("Highlight handler failed")
+    except discord.Forbidden:
+        logging.error(
+            "Highlight: cannot post in channel %s — the bot needs Send Messages, "
+            "Embed Links and Attach Files there. Message %s will be retried on its next reaction.",
+            hl_id, msg.id,
+        )
+        return
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO highlights (message_id, ts) VALUES (?, ?)", (msg.id, time.time()))
+    db.commit()
+    logging.info("Highlight: message %s (%d voters)", msg.id, count)
 
 
 # ---- Server stats channels (member count + Steam players online) ----

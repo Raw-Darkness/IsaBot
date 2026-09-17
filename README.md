@@ -130,7 +130,7 @@ To run it as a service on Linux (or WSL2 with systemd enabled), something like:
     "FAQModel" / "TranslateModel" / "LoreModel": optional per-task overrides of UtilityModel
     "WikiBaseURL":           base URL of a MediaWiki wiki for /wiki (empty = disabled)
     "HighlightsChannelID":   channel for starred highlights (0 = disabled)
-    "HighlightEmojis" / "HighlightThreshold": accepted reactions (any of them count) and the number of unique voters needed
+    "HighlightEmojis" / "HighlightThreshold": accepted reactions (any of them count) and the number of unique voters needed. Custom server emoji are listed by name (e.g. "MyHeart"). The bot needs Send Messages, Embed Links and Attach Files in the highlights channel
     "HighlightImagesOnly":   true = only the bot's own images qualify; false = any message
     "StatsEnabled":          turn the stats channel renaming on (bot needs Manage Channels on those channels)
     "StatsMemberChannelID" / "StatsMemberTemplate": channel renamed to the member count, e.g. "all-members-{count}"
