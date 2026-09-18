@@ -932,6 +932,10 @@ async def sd_generate(
         payload["hr_scale"] = float(config.get("SDUpscaleFactor", 2.0))
         payload["hr_upscaler"] = config.get("SDHiresUpscaler", "Latent")
         payload["denoising_strength"] = 0.4
+        # Forge defaults this to None and then tests membership on it, so an API
+        # hires request without it fails with "argument of type 'NoneType' is not
+        # iterable". "Use same choices" means "keep the base model's modules".
+        payload["hr_additional_modules"] = ["Use same choices"]
 
     try:
         j = await _sd_post(endpoint, payload)
