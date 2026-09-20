@@ -10,6 +10,7 @@ import random
 import re
 import signal
 import sqlite3
+import sys
 import time
 import urllib.parse
 from collections import deque
@@ -3481,4 +3482,17 @@ def _setup_signal_handlers():
 # Run
 # =============================================================================
 _setup_signal_handlers()
-bot.run(config["DiscordToken"])
+
+# A rejected token is permanent until a human fixes it. Exiting with a code the
+# service unit refuses to restart stops the bot hammering Discord's login
+# endpoint every few seconds, which risks a temporary IP ban.
+try:
+    bot.run(config["DiscordToken"])
+except discord.LoginFailure:
+    logging.error(
+        "Discord rejected the bot token. Generate a new one in the Developer Portal "
+        "(Applications -> Bot -> Reset Token), put it in %s as DiscordToken, then start "
+        "the service again. Not retrying.",
+        CONFIG_PATH,
+    )
+    sys.exit(78)
