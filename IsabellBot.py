@@ -11,6 +11,7 @@ import re
 import signal
 import sqlite3
 import sys
+import unicodedata
 import time
 import urllib.parse
 from collections import deque
@@ -1038,6 +1039,19 @@ async def _image_button(interaction: discord.Interaction, action: str):
             await interaction.response.send_message(text, ephemeral=True)
             return
 
+        if not images_enabled():
+            await interaction.response.send_message(
+                config.get("ImageDisabledNotice", "Image generation is currently disabled."),
+                ephemeral=True)
+            return
+        blocked = image_prompt_blocked(rec.final_sd_prompt) or image_prompt_blocked(rec.user_prompt)
+        if blocked:
+            await interaction.response.send_message(config.get(
+                "ImageRefusalMessage",
+                "No. That is not something I will ever draw, and the moderators have been notified."), ephemeral=True)
+            await refuse_image_request(interaction.channel, interaction.user.id,
+                                       interaction.user.display_name, blocked, rec.final_sd_prompt)
+            return
         if not get_user_bucket(interaction.user.id).consume():
             await interaction.response.send_message("You're requesting images too fast — slow down a bit.", ephemeral=True)
             return
@@ -1055,6 +1069,7 @@ async def _image_button(interaction: discord.Interaction, action: str):
             width=rec.width or None,
             height=rec.height or None,
             requested_by=interaction.user.display_name,
+            requester_id=interaction.user.id,
             status_msg=status_msg,
         )
         if action == "vary":
@@ -1082,12 +1097,23 @@ async def run_image_job(
     positive_prefix: str | None = None,
     init_image_b64: str | None = None,
     requested_by: str = "",
+    requester_id: int = 0,
     trigger_message_id: int = 0,
     status_msg=None,
 ):
     """Queue a generation, show progress, deliver the result with action buttons."""
     global _sd_waiting
     try:
+        # Last line of defence: every image path funnels through here, including
+        # buttons, refinements and LLM-rewritten prompts.
+        if not images_enabled():
+            await image_unavailable(channel)
+            return
+        blocked = image_prompt_blocked(sd_prompt) or image_prompt_blocked(user_prompt)
+        if blocked:
+            await refuse_image_request(channel, requester_id, requested_by or "unknown",
+                                       blocked, sd_prompt)
+            return
         sem = _get_sd_semaphore()
         queued = sem.locked()
         if queued:
@@ -1226,6 +1252,111 @@ async def refine_image_prompt(last: ImagePromptRecord, followup_text: str) -> di
 
 
 # =============================================================================
+# Image safety
+# =============================================================================
+# Two independent controls:
+#   1. ImageGenerationEnabled — a master switch that disables all drawing.
+#   2. A hard refusal filter for prompts seeking sexualised minors, enforced on
+#      BOTH the raw user text and the final prompt sent to Stable Diffusion.
+#      The LLM rewrite sits between those two, so checking only one is a bypass.
+# The built-in term list cannot be removed or overridden by config; config may
+# only add to it.
+_LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+                       "@": "a", "$": "s", "!": "i"})
+
+_BLOCK_TERMS_BUILTIN = frozenset({
+    "child", "children", "childlike", "childish", "kid", "kids", "minor", "minors",
+    "underage", "under age", "under 18", "preteen", "pre teen", "tween", "toddler",
+    "infant", "newborn", "baby", "babies", "babyface", "juvenile", "prepubescent",
+    "pubescent", "before puberty", "not yet developed", "undeveloped body",
+    "loli", "lolis", "lolicon", "lolita", "shota", "shotacon", "toddlercon", "jailbait",
+    "schoolgirl", "school girl", "schoolboy", "school boy", "grade school",
+    "elementary school", "kindergarten", "middle school", "high school",
+    "teen", "teens", "teenage", "teenager", "adolescent",
+    "young girl", "young boy", "young one", "little girl", "little boy",
+    "small girl", "small boy", "flat chested child", "youngster",
+})
+# Terms distinctive enough to catch even when spaced or punctuated apart
+# ("l.o.l.i", "l o l i") by matching the de-punctuated text.
+_BLOCK_TERMS_SQUASHED = frozenset({
+    "loli", "lolicon", "shota", "shotacon", "toddlercon", "jailbait",
+    "preteen", "underage", "prepubescent",
+})
+_AGE_NUM_RE = re.compile(
+    r"\b(\d{1,2})\s*(?:y\.?o\.?\b|yo\b|yrs?\b|years?\b)(?:\s*old)?|\baged?\s*[:=]?\s*(\d{1,2})\b"
+)
+
+
+def _normalize_for_filter(text: str) -> tuple[str, str, str]:
+    """Return (leet-folded, de-punctuated, digit-preserving) forms of the text.
+
+    Leet folding maps digits onto letters so "l0li" is caught, which also
+    destroys real numbers — so ages are matched against the untouched form.
+    """
+    base = unicodedata.normalize("NFKD", (text or "").lower())
+    base = "".join(c for c in base if not unicodedata.combining(c))
+    folded = re.sub(r"[^a-z0-9]+", " ", base.translate(_LEET)).strip()
+    plain = re.sub(r"[^a-z0-9]+", " ", base).strip()
+    return folded, folded.replace(" ", ""), plain
+
+
+def image_prompt_blocked(text: str) -> str | None:
+    """The matched term if this prompt must be refused, else None."""
+    if not text:
+        return None
+    norm, squashed, plain = _normalize_for_filter(text)
+    terms = set(_BLOCK_TERMS_BUILTIN) | {
+        str(t).lower().strip() for t in (config.get("ImageBlockExtraTerms") or []) if str(t).strip()
+    }
+    for term in terms:
+        if " " in term:
+            if term in norm:
+                return term
+        elif re.search(rf"\b{re.escape(term)}\b", norm):
+            return term
+    for term in _BLOCK_TERMS_SQUASHED:
+        if term in squashed:
+            return term
+    limit = int(config.get("ImageBlockAgeUnder", 18))
+    for m in _AGE_NUM_RE.finditer(plain):
+        num = m.group(1) or m.group(2)
+        if num is not None and int(num) < limit:
+            return f"age {num}"
+    return None
+
+
+async def refuse_image_request(channel, uid: int, name: str, matched: str, text: str):
+    """Refuse a blocked prompt: tell the user, record it, alert the mods."""
+    logging.warning("Image prompt REFUSED | user=%s (%s) | matched=%r | text=%r",
+                    name, uid, matched, (text or "")[:200])
+    try:
+        add_user_record(uid, "blocked_image_prompt", f"matched '{matched}': {(text or '')[:200]}")
+    except Exception:
+        logging.exception("Could not record blocked prompt")
+    if config.get("ImageBlockAlertMods", True):
+        try:
+            await _flag_to_mods(
+                "Blocked image prompt",
+                f"User: **{name}** ({uid})\nMatched: `{matched}`\nPrompt: {(text or '')[:300]}",
+            )
+        except Exception:
+            logging.exception("Could not alert mods about blocked prompt")
+    await safe_send(channel, config.get(
+        "ImageRefusalMessage",
+        "No. That is not something I will ever draw, and the moderators have been notified.",
+    ))
+
+
+def images_enabled() -> bool:
+    return bool(config.get("ImageGenerationEnabled", True))
+
+
+async def image_unavailable(channel) -> None:
+    await safe_send(channel, config.get(
+        "ImageDisabledNotice", "Image generation is currently disabled."))
+
+
+# =============================================================================
 # Image tool (model-decided drawing)
 # =============================================================================
 # Keyword matching catches explicit requests; this catches the rest — phrasings
@@ -1260,7 +1391,7 @@ IMAGE_TOOL = {
 
 def image_tools_for(message: discord.Message):
     """The tool list for this message, or None when model-decided drawing is off."""
-    if not config.get("ImageToolEnabled", False):
+    if not config.get("ImageToolEnabled", False) or not images_enabled():
         return None
     if not _image_channel_allowed(message.channel):
         return None
@@ -1272,6 +1403,14 @@ async def run_tool_image(message: discord.Message, args: dict) -> bool:
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return False
+    if not images_enabled():
+        await image_unavailable(message.channel)
+        return True
+    blocked = image_prompt_blocked(prompt)
+    if blocked:
+        await refuse_image_request(message.channel, message.author.id,
+                                   message.author.display_name, blocked, prompt)
+        return True
     if not get_user_bucket(message.author.id).consume():
         await safe_send(message.channel, "You're requesting images too fast — slow down a bit.")
         return True
@@ -1292,6 +1431,7 @@ async def run_tool_image(message: discord.Message, args: dict) -> bool:
         width=width,
         height=height,
         requested_by=message.author.display_name,
+        requester_id=message.author.id,
         trigger_message_id=message.id,
         status_msg=status,
     ))
@@ -1579,6 +1719,7 @@ async def _handle_level_up(message: discord.Message, old_level: int, new_level: 
                 sd_prompt=str(config["XPStarPortraitPrompt"]),
                 neg=config.get("SDNegativePrompt", "(lowres, blurry, deformed)"),
                 requested_by=member.display_name,
+                requester_id=member.id,
             ))
         except Exception:
             logging.exception("Star portrait failed")
@@ -2152,6 +2293,14 @@ async def handle_image_message(message: discord.Message, text_override: str | No
             return
 
         text_in = text_override if text_override is not None else (message.content or "")
+        if not images_enabled():
+            await image_unavailable(message.channel)
+            return
+        blocked = image_prompt_blocked(text_in)
+        if blocked:
+            await refuse_image_request(message.channel, message.author.id,
+                                       message.author.display_name, blocked, text_in)
+            return
         exact_mode = is_exact_trigger(text_in)
 
         raw = text_in
@@ -2237,6 +2386,7 @@ async def handle_image_message(message: discord.Message, text_override: str | No
             positive_prefix=positive_prefix,
             init_image_b64=init_b64,
             requested_by=message.author.display_name,
+            requester_id=message.author.id,
             trigger_message_id=message.id,
             status_msg=status_msg,
         )
@@ -2905,6 +3055,19 @@ async def draw_command(
 ):
     try:
         channel = interaction.channel
+        if not images_enabled():
+            await interaction.response.send_message(
+                config.get("ImageDisabledNotice", "Image generation is currently disabled."),
+                ephemeral=True)
+            return
+        blocked = image_prompt_blocked(prompt)
+        if blocked:
+            await interaction.response.send_message(config.get(
+                "ImageRefusalMessage",
+                "No. That is not something I will ever draw, and the moderators have been notified."), ephemeral=True)
+            await refuse_image_request(channel, interaction.user.id,
+                                       interaction.user.display_name, blocked, prompt)
+            return
         if not _image_channel_allowed(channel):
             allowed = ", ".join(f"<#{c}>" for c in config.get("AllowedChannels", [])) or "my channels"
             await interaction.response.send_message(f"I only paint in {allowed} — or in DMs.", ephemeral=True)
@@ -2949,6 +3112,7 @@ async def draw_command(
             height=height,
             positive_prefix=positive_prefix,
             requested_by=interaction.user.display_name,
+            requester_id=interaction.user.id,
             status_msg=status_msg,
         ))
     except Exception:
