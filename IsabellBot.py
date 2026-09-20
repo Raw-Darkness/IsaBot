@@ -1287,6 +1287,17 @@ _AGE_NUM_RE = re.compile(
 )
 
 
+def _obfuscated(term: str, text: str) -> bool:
+    """True if `term` appears deliberately broken up, e.g. "l.o.l.i" or "l o l i".
+
+    Collapsing all whitespace instead would make "lol is" match "loli", which it
+    did against real traffic — "lol" is far too common to treat that way.
+    """
+    punct = r"[._\-*+~|]+".join(re.escape(c) for c in term)
+    spaced = r"\s+".join(re.escape(c) for c in term)
+    return bool(re.search(rf"\b{punct}\b", text) or re.search(rf"\b{spaced}\b", text))
+
+
 def _normalize_for_filter(text: str) -> tuple[str, str, str]:
     """Return (leet-folded, de-punctuated, digit-preserving) forms of the text.
 
@@ -1305,6 +1316,7 @@ def image_prompt_blocked(text: str) -> str | None:
     if not text:
         return None
     norm, squashed, plain = _normalize_for_filter(text)
+    folded_raw = unicodedata.normalize("NFKD", (text or "").lower()).translate(_LEET)
     terms = set(_BLOCK_TERMS_BUILTIN) | {
         str(t).lower().strip() for t in (config.get("ImageBlockExtraTerms") or []) if str(t).strip()
     }
@@ -1315,7 +1327,7 @@ def image_prompt_blocked(text: str) -> str | None:
         elif re.search(rf"\b{re.escape(term)}\b", norm):
             return term
     for term in _BLOCK_TERMS_SQUASHED:
-        if term in squashed:
+        if _obfuscated(term, folded_raw):
             return term
     limit = int(config.get("ImageBlockAgeUnder", 18))
     for m in _AGE_NUM_RE.finditer(plain):
@@ -1345,6 +1357,128 @@ async def refuse_image_request(channel, uid: int, name: str, matched: str, text:
         "ImageRefusalMessage",
         "No. That is not something I will ever draw, and the moderators have been notified.",
     ))
+
+
+# ---- Chat safety -----------------------------------------------------------
+# Images can refuse on any age word, because no legitimate prompt needs one.
+# Chat cannot: this game's roleplay is about breeding and offspring, so "child",
+# "children" and "baby" occur constantly and innocently. So chat is tiered:
+#   1. terms with no innocent use               -> always refuse
+#   2. words describing a minor as a person     -> refuse when the message is sexual
+#   3. a stated age under 18                    -> refuse when the message is sexual
+#   4. offspring words (child/kid/baby)         -> refuse only when a hard sexual
+#      term sits within a few words of them, which separates "you will bear my
+#      child" from "fuck the child".
+_CHAT_ALWAYS_BLOCK = frozenset({
+    "loli", "lolis", "lolicon", "lolita", "shota", "shotacon", "toddlercon",
+    "jailbait", "jail bait", "pedo", "pedophile", "paedophile", "pedophilia",
+    "underage", "under age", "preteen", "pre teen", "prepubescent", "child porn",
+    "childporn", "csam", "child sex", "sex with a child", "sex with children",
+})
+_MINOR_DESCRIPTORS = frozenset({
+    "young girl", "young boy", "little girl", "little boy", "small girl", "small boy",
+    "schoolgirl", "school girl", "schoolboy", "school boy", "teen", "teens",
+    "teenage", "teenager", "adolescent", "toddler", "infant", "newborn",
+    "grade school", "elementary school", "kindergarten", "middle school",
+    "youngster", "minor girl", "minor boy",
+})
+_AMBIGUOUS_OFFSPRING = ("child", "children", "kid", "kids", "baby", "babies")
+_SEXUAL_RE = re.compile(
+    r"\b(fuck\w*|cock|dick|pussy|cunt|cum\w*|semen|breed\w*|naked|nude|sex|sexual|horny|"
+    r"slut\w*|whore|virgin|penetrat\w*|rape|raping|impregnat\w*|tits|breasts|nipples|"
+    r"moan\w*|orgasm\w*|aroused|erect\w*|thrust\w*|mount\w*|suck\w*|lick\w*|anal|oral|"
+    r"blowjob|creampie|ravish\w*|deflower\w*|molest\w*|seduc\w*|undress\w*|strip\w*|"
+    r"grope\w*|fondl\w*|caress\w*|bondage|submissive|dominate|lust\w*|arousal)\b"
+    # Euphemisms only count with an object, so "take a look" stays innocent while
+    # "take her hard" does not.
+    r"|\b(take|takes|taking|took|claim\w*|bed|ride|rides|riding|use|using|touch\w*|"
+    r"kiss\w*|have|had)\s+(you|her|him|me|them|his|their)\b"
+    r"|\bmake love\b|\bhave my way\b|\bspread (her|your|his) legs\b", re.IGNORECASE)
+# "you're 12", "i am 15", "she is 13" — an age with no "years old" attached.
+_BARE_AGE_RE = re.compile(
+    r"\b(?:you re|youre|you are|i m|im|i am|she is|shes|he is|hes)\s+(\d{1,2})\b")
+# Deliberately narrower: these must sit *next to* an offspring word to trigger.
+_HARD_SEXUAL = frozenset({
+    "fuck", "fucks", "fucking", "fucked", "rape", "raped", "raping", "penetrate",
+    "penetrated", "penetrating", "cock", "dick", "pussy", "cunt", "anal", "oral",
+    "blowjob", "cum", "cumming", "suck", "sucking", "lick", "licking", "thrust",
+    "thrusting", "deflower", "molest", "molesting", "slut", "whore", "horny",
+})
+
+
+def chat_message_blocked(text: str, context: str = "") -> str | None:
+    """The matched reason if this chat text must be refused, else None.
+
+    `context` is the recent conversation. A minor established a few turns earlier
+    ("roleplay as a 15 year old") is still a minor when the sexual turn arrives,
+    so age indicators are searched across the exchange while the sexual trigger
+    must be in the current message.
+    """
+    if not config.get("ChatFilterEnabled", True) or not text:
+        return None
+    norm, squashed, plain = _normalize_for_filter(text)
+    if context:
+        c_norm, _, c_plain = _normalize_for_filter(context)
+        scope_norm, scope_plain = f"{c_norm} {norm}", f"{c_plain} {plain}"
+    else:
+        scope_norm, scope_plain = norm, plain
+    extra = {str(t).lower().strip() for t in (config.get("ChatBlockExtraTerms") or []) if str(t).strip()}
+    for term in set(_CHAT_ALWAYS_BLOCK) | extra:
+        if (term in norm) if " " in term else re.search(rf"\b{re.escape(term)}\b", norm):
+            return term
+    folded_raw = unicodedata.normalize("NFKD", (text or "").lower()).translate(_LEET)
+    for term in ("loli", "lolicon", "shota", "shotacon", "toddlercon", "jailbait", "pedo"):
+        if _obfuscated(term, folded_raw):
+            return term
+
+    # "she is 13", "i am 15" — a person's stated age needs no sexual context to be
+    # disqualifying here. ("the game is 4 years old" does not match: this pattern
+    # requires a personal pronoun.)
+    limit = int(config.get("ImageBlockAgeUnder", 18))
+    for m in _BARE_AGE_RE.finditer(scope_plain):
+        if int(m.group(1)) < limit:
+            return f"stated age {m.group(1)}"
+
+    if not _SEXUAL_RE.search(norm):
+        return None
+
+    for term in _MINOR_DESCRIPTORS:
+        if (term in scope_norm) if " " in term else re.search(rf"\b{re.escape(term)}\b", scope_norm):
+            return f"{term} + sexual context"
+    for m in _AGE_NUM_RE.finditer(scope_plain):
+        num = next((g for g in m.groups() if g), None)
+        if num is not None and int(num) < limit:
+            return f"age {num} + sexual context"
+
+    words = norm.split()
+    hard = [i for i, w in enumerate(words) if w in _HARD_SEXUAL]
+    if hard:
+        window = int(config.get("ChatOffspringProximity", 3))
+        for i, w in enumerate(words):
+            if w in _AMBIGUOUS_OFFSPRING and any(abs(i - j) <= window for j in hard):
+                return f"{w} near sexual term"
+    return None
+
+
+async def refuse_chat(channel, uid: int, name: str, matched: str, text: str, source: str):
+    """Refuse a blocked chat message or model reply."""
+    logging.warning("Chat REFUSED (%s) | user=%s (%s) | matched=%r | text=%r",
+                    source, name, uid, matched, (text or "")[:200])
+    try:
+        add_user_record(uid, f"blocked_chat_{source}", f"matched '{matched}': {(text or '')[:200]}")
+    except Exception:
+        logging.exception("Could not record blocked chat")
+    if config.get("ChatBlockAlertMods", True):
+        try:
+            await _flag_to_mods(
+                f"Blocked chat ({source})",
+                f"User: **{name}** ({uid})\nMatched: `{matched}`\nText: {(text or '')[:300]}",
+            )
+        except Exception:
+            logging.exception("Could not alert mods about blocked chat")
+    await safe_send(channel, config.get(
+        "ChatRefusalMessage",
+        "No. I will not go there, and the moderators have been notified."))
 
 
 def images_enabled() -> bool:
@@ -2192,6 +2326,16 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
         ch_id = channel_key(message)
         is_dm = isinstance(message.channel, discord.DMChannel)
 
+        incoming = text_override if text_override is not None else (message.content or "")
+        recent_ctx = " ".join(t for _, t in list(cm.get(ch_id).turns)[-6:])[-1500:]
+        blocked = chat_message_blocked(incoming, recent_ctx)
+        if blocked:
+            # Never reaches the model and never enters conversation memory, so it
+            # cannot steer later replies.
+            await refuse_chat(message.channel, message.author.id,
+                              message.author.display_name, blocked, incoming, "input")
+            return
+
         cm.add_user(ch_id, is_dm, message.author.id, message.author.display_name, message.content, message.id)
         await cm.maybe_compress(ch_id)
 
@@ -2272,6 +2416,20 @@ async def handle_text_message(message: discord.Message, text_override: str | Non
                 logging.warning("Repetition persists in ch %s; reply withheld from memory", ch_id)
                 await safe_send(message.channel, (fresh or "").strip() or reply)
                 return
+
+        # Include the user's current turn: they may have set the scene in the very
+        # message that prompted this reply.
+        out_blocked = chat_message_blocked(reply, f"{recent_ctx} {incoming}")
+        if out_blocked:
+            # Drop the exchange entirely: storing it would let the reply seed
+            # later turns through the conversation window and summaries.
+            cv = cm.get(ch_id)
+            if cv.turns:
+                cv.turns.pop()
+            cm.mark_dirty()
+            await refuse_chat(message.channel, message.author.id,
+                              message.author.display_name, out_blocked, reply, "model output")
+            return
 
         cm.add_assistant(ch_id, reply)
         await safe_send(message.channel, reply)

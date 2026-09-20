@@ -129,5 +129,10 @@
     "ImageRefusalMessage": "That request is refused and has been reported to the moderators.",
     "ImageBlockExtraTerms": [],
     "ImageBlockAlertMods": true,
-    "ImageBlockAgeUnder": 18
+    "ImageBlockAgeUnder": 18,
+    "ChatFilterEnabled": true,
+    "ChatRefusalMessage": "That request is refused and has been reported to the moderators.",
+    "ChatBlockExtraTerms": [],
+    "ChatBlockAlertMods": true,
+    "ChatOffspringProximity": 3
 }
