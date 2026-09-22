@@ -1414,8 +1414,24 @@ _HARD_SEXUAL = frozenset({
     "fuck", "fucks", "fucking", "fucked", "rape", "raped", "raping", "penetrate",
     "penetrated", "penetrating", "cock", "dick", "pussy", "cunt", "anal", "oral",
     "blowjob", "cum", "cumming", "suck", "sucking", "lick", "licking", "thrust",
-    "thrusting", "deflower", "molest", "molesting", "slut", "whore", "horny",
+    "thrusting", "deflower", "molest", "molesting", "horny",
 })
+# Only these descriptors are carried across turns. "schoolgirl"/"teen" are common
+# costume and life-stage words in adult roleplay; carrying them forward flagged
+# unrelated later messages and left moderators unable to find the trigger.
+_MINOR_DESCRIPTORS_CARRIED = frozenset({
+    "young girl", "young boy", "little girl", "little boy", "small girl", "small boy",
+    "toddler", "kindergarten", "grade school", "elementary school", "minor girl", "minor boy",
+})
+_BABY_DETERMINERS = ("a", "the", "that", "this", "her", "his", "their", "our", "newborn", "little")
+
+
+def _snippet(text: str, term: str, width: int = 28) -> str:
+    m = re.search(rf"\b{re.escape(term)}\b", text, re.I)
+    if not m:
+        return ""
+    s = text[max(0, m.start() - width): m.end() + width].replace("\n", " ")
+    return f'"…{s}…"'
 
 
 def chat_message_blocked(text: str, context: str = "") -> str | None:
@@ -1447,28 +1463,39 @@ def chat_message_blocked(text: str, context: str = "") -> str | None:
     # disqualifying here. ("the game is 4 years old" does not match: this pattern
     # requires a personal pronoun.)
     limit = int(config.get("ImageBlockAgeUnder", 18))
-    for m in _BARE_AGE_RE.finditer(scope_plain):
-        if int(m.group(1)) < limit:
-            return f"stated age {m.group(1)}"
+    for where, hay in (("", plain), ("[from an earlier message] ", c_plain if context else "")):
+        for m in _BARE_AGE_RE.finditer(hay):
+            if int(m.group(1)) < limit:
+                return f"stated age {m.group(1)} {where}{_snippet(text if not where else context, m.group(1))}"
 
     if not _SEXUAL_RE.search(norm):
         return None
 
     for term in _MINOR_DESCRIPTORS:
-        if (term in scope_norm) if " " in term else re.search(rf"\b{re.escape(term)}\b", scope_norm):
-            return f"{term} + sexual context"
-    for m in _AGE_NUM_RE.finditer(scope_plain):
-        num = next((g for g in m.groups() if g), None)
-        if num is not None and int(num) < limit:
-            return f"age {num} + sexual context"
+        in_msg = (term in norm) if " " in term else re.search(rf"\b{re.escape(term)}\b", norm)
+        if in_msg:
+            return f"{term} + sexual context {_snippet(text, term)}"
+        if context and term in _MINOR_DESCRIPTORS_CARRIED:
+            in_ctx = (term in c_norm) if " " in term else re.search(rf"\b{re.escape(term)}\b", c_norm)
+            if in_ctx:
+                return f"{term} + sexual context [from an earlier message: {_snippet(context, term)}]"
+    for where, hay in (("", plain), ("[from an earlier message] ", c_plain if context else "")):
+        for m in _AGE_NUM_RE.finditer(hay):
+            num = next((g for g in m.groups() if g), None)
+            if num is not None and int(num) < limit:
+                return f"age {num} + sexual context {where}{_snippet(text if not where else context, m.group(0))}"
 
     words = norm.split()
     hard = [i for i, w in enumerate(words) if w in _HARD_SEXUAL]
     if hard:
         window = int(config.get("ChatOffspringProximity", 3))
         for i, w in enumerate(words):
-            if w in _AMBIGUOUS_OFFSPRING and any(abs(i - j) <= window for j in hard):
-                return f"{w} near sexual term"
+            if w not in _AMBIGUOUS_OFFSPRING or not any(abs(i - j) <= window for j in hard):
+                continue
+            # "see my dick baby" is an endearment; "fuck the baby" is not.
+            if w in ("baby", "babies") and (i == 0 or words[i - 1] not in _BABY_DETERMINERS):
+                continue
+            return f"{w} near sexual term {_snippet(text, w)}"
     return None
 
 
