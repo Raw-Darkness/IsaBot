@@ -134,5 +134,6 @@
     "ChatRefusalMessage": "That request is refused and has been reported to the moderators.",
     "ChatBlockExtraTerms": [],
     "ChatBlockAlertMods": true,
-    "ChatOffspringProximity": 3
+    "ChatOffspringProximity": 3,
+    "ChatRefusalMessageSoft": "I can't continue with that wording. If that wasn't what you meant, rephrase and we'll carry on — a moderator has been notified so they can check."
 }

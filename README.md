@@ -104,7 +104,8 @@ To run it as a service on Linux (or WSL2 with systemd enabled), something like:
     "ImageBlockAgeUnder":    stated ages below this are refused (default 18)
     "ImageBlockAlertMods":   send refused prompts to the mod channel
     "ChatFilterEnabled":     refuse chat messages (and bot replies) that sexualise minors
-    "ChatRefusalMessage":    message shown when chat is refused
+    "ChatRefusalMessage":    message shown for a hard match (a term with no innocent use)
+    "ChatRefusalMessageSoft": message shown for a contextual match, which can be a misunderstanding — keep it non-accusatory. No automated punishment is ever applied; alerts go to moderators for a human decision
     "ChatBlockExtraTerms":   additional always-blocked chat terms (adds to the built-in list)
     "ChatOffspringProximity": how close a hard sexual term must be to "child"/"baby" to trigger (default 3 words)
     "ChatBlockAlertMods":    send refused chat to the mod channel

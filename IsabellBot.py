@@ -1283,7 +1283,7 @@ _BLOCK_TERMS_SQUASHED = frozenset({
     "preteen", "underage", "prepubescent",
 })
 _AGE_NUM_RE = re.compile(
-    r"\b(\d{1,2})\s*(?:y\.?o\.?\b|yo\b|yrs?\b|years?\b)(?:\s*old)?|\baged?\s*[:=]?\s*(\d{1,2})\b"
+    r"\b(\d{1,2})\s*(?:years?|yrs?)\s*old\b|\b(\d{1,2})\s*y\.?o\.?\b|\baged?\s*[:=]?\s*(\d{1,2})\b"
 )
 
 
@@ -1320,18 +1320,22 @@ def image_prompt_blocked(text: str) -> str | None:
     terms = set(_BLOCK_TERMS_BUILTIN) | {
         str(t).lower().strip() for t in (config.get("ImageBlockExtraTerms") or []) if str(t).strip()
     }
-    for term in terms:
-        if " " in term:
-            if term in norm:
-                return term
-        elif re.search(rf"\b{re.escape(term)}\b", norm):
-            return term
+    # Deterministic order, and prefer reporting a term used as content over one
+    # that only appears as a "(term:weight)" exclusion — the block is the same
+    # either way, but the logged reason should be stable and the most telling.
+    hits = [t for t in sorted(terms)
+            if (t in norm) if " " in t else re.search(rf"\b{re.escape(t)}\b", norm)]
+    if hits:
+        weighted_only = lambda t: len(re.findall(rf"\(\s*{re.escape(t)}\s*:\s*[\d.]+\s*\)", text, re.I)) \
+            == len(re.findall(rf"\b{re.escape(t)}\b", text, re.I))
+        content_hits = [t for t in hits if not weighted_only(t)]
+        return (content_hits or hits)[0]
     for term in _BLOCK_TERMS_SQUASHED:
         if _obfuscated(term, folded_raw):
             return term
     limit = int(config.get("ImageBlockAgeUnder", 18))
     for m in _AGE_NUM_RE.finditer(plain):
-        num = m.group(1) or m.group(2)
+        num = next((g for g in m.groups() if g), None)
         if num is not None and int(num) < limit:
             return f"age {num}"
     return None
@@ -1378,11 +1382,14 @@ _CHAT_ALWAYS_BLOCK = frozenset({
 _MINOR_DESCRIPTORS = frozenset({
     "young girl", "young boy", "little girl", "little boy", "small girl", "small boy",
     "schoolgirl", "school girl", "schoolboy", "school boy", "teen", "teens",
-    "teenage", "teenager", "adolescent", "toddler", "infant", "newborn",
+    "teenage", "teenager", "adolescent", "toddler",
     "grade school", "elementary school", "kindergarten", "middle school",
     "youngster", "minor girl", "minor boy",
 })
-_AMBIGUOUS_OFFSPRING = ("child", "children", "kid", "kids", "baby", "babies")
+# Offspring words: this community's roleplay is about breeding, so these are
+# innocent unless a hard sexual term is right next to them — and they are only
+# looked for in the current message, never carried over from earlier turns.
+_AMBIGUOUS_OFFSPRING = ("child", "children", "kid", "kids", "baby", "babies", "newborn", "infant")
 _SEXUAL_RE = re.compile(
     r"\b(fuck\w*|cock|dick|pussy|cunt|cum\w*|semen|breed\w*|naked|nude|sex|sexual|horny|"
     r"slut\w*|whore|virgin|penetrat\w*|rape|raping|impregnat\w*|tits|breasts|nipples|"
@@ -1396,7 +1403,12 @@ _SEXUAL_RE = re.compile(
     r"|\bmake love\b|\bhave my way\b|\bspread (her|your|his) legs\b", re.IGNORECASE)
 # "you're 12", "i am 15", "she is 13" — an age with no "years old" attached.
 _BARE_AGE_RE = re.compile(
-    r"\b(?:you re|youre|you are|i m|im|i am|she is|shes|he is|hes)\s+(\d{1,2})\b")
+    r"\b(?:you re|youre|you are|i m|im|i am|she is|shes|he is|hes)\s+(\d{1,2})\b"
+    # Not an age when a measurement, a count or a second number follows:
+    # "she is 5 foot", "he is 10 inches", "she is 5 6", "i am 20 minutes away".
+    r"(?!\s*(?:\d|feet|foot|ft|inch|inches|in\b|cm|mm|m\b|meters?|metres?|kg|lbs?|pounds?|stone|"
+    r"tall|long|wide|thick|big|percent|minutes?|hours?|days?|weeks?|months?|years? (?:in|into|of|since|ago|from)|"
+    r"k\b|x\b|th\b|st\b|nd\b|rd\b|levels?|lvl|xp|points?|coins?|gold))")
 # Deliberately narrower: these must sit *next to* an offspring word to trigger.
 _HARD_SEXUAL = frozenset({
     "fuck", "fucks", "fucking", "fucked", "rape", "raped", "raping", "penetrate",
@@ -1460,10 +1472,18 @@ def chat_message_blocked(text: str, context: str = "") -> str | None:
     return None
 
 
+def _is_hard_match(matched: str) -> bool:
+    """Tier-1 terms with no innocent use, vs. contextual matches that may be mistaken."""
+    m = (matched or "").lower()
+    return (" + " not in m and " near " not in m and not m.startswith(("age ", "stated age")))
+
+
 async def refuse_chat(channel, uid: int, name: str, matched: str, text: str, source: str):
-    """Refuse a blocked chat message or model reply."""
-    logging.warning("Chat REFUSED (%s) | user=%s (%s) | matched=%r | text=%r",
-                    source, name, uid, matched, (text or "")[:200])
+    """Refuse a blocked chat message or model reply. No automated punishment is
+    applied here or anywhere else: a human moderator decides what happens next."""
+    hard = _is_hard_match(matched)
+    logging.warning("Chat REFUSED (%s, %s) | user=%s (%s) | matched=%r | text=%r",
+                    source, "hard" if hard else "contextual", name, uid, matched, (text or "")[:200])
     try:
         add_user_record(uid, f"blocked_chat_{source}", f"matched '{matched}': {(text or '')[:200]}")
     except Exception:
@@ -1471,14 +1491,19 @@ async def refuse_chat(channel, uid: int, name: str, matched: str, text: str, sou
     if config.get("ChatBlockAlertMods", True):
         try:
             await _flag_to_mods(
-                f"Blocked chat ({source})",
+                f"Blocked chat — {'HARD term' if hard else 'contextual match, please verify'} ({source})",
                 f"User: **{name}** ({uid})\nMatched: `{matched}`\nText: {(text or '')[:300]}",
             )
         except Exception:
             logging.exception("Could not alert mods about blocked chat")
-    await safe_send(channel, config.get(
-        "ChatRefusalMessage",
-        "No. I will not go there, and the moderators have been notified."))
+    if hard:
+        msg = config.get("ChatRefusalMessage",
+                         "No. I will not go there, and the moderators have been notified.")
+    else:
+        msg = config.get("ChatRefusalMessageSoft",
+                         "I can't continue with that wording. If that wasn't what you meant, "
+                         "rephrase and we'll carry on — a moderator has been notified so they can check.")
+    await safe_send(channel, msg)
 
 
 def images_enabled() -> bool:
