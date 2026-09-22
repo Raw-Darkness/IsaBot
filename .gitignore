@@ -38,3 +38,5 @@ __pycache__/
 image_memory.json
 isabot.db*
 game_faq*
+moderation_review*
+discord_appeal*
