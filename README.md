@@ -1,4 +1,14 @@
 # IsaBot
+
+> **This repository is no longer developed.** On 2026-09-22 the bot was split into two separate projects, each with its own repository:
+>
+> * **[barnabus-bot](https://github.com/Raw-Darkness/barnabus-bot)** — moderation and community features: mod log, user records, safety monitor, spam/flood detection, honeypot, XP ranks, highlights, stats channels, FAQ answers, `/wiki`, `/lore`, Translate and the daily digest. No chat persona, no image generation.
+> * **[isabell-bot](https://github.com/Raw-Darkness/isabell-bot)** — roleplay chat and image generation only, with layered safety controls: word filters, a model second opinion, a vision review of every rendered image, age-restricted channel gating and a cooldown for repeat offenders.
+>
+> Splitting them means the moderation bot keeps running when the image bot is down, the image bot holds no moderation permissions, and each half can be hosted where it fits best. The code below is kept for reference only; bug fixes and new features go to the two repositories above.
+
+---
+
 A python Discord bot with an LLM persona. It chats like a regular user (no commands needed), generates images through a local Stable Diffusion instance, and helps moderate the server. Point it at any OpenAI-compatible API (OpenAI, OpenRouter, or a locally hosted model).
 
 #### Disclaimer:
