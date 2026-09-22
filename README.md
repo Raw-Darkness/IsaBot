@@ -97,6 +97,10 @@ To run it as a service on Linux (or WSL2 with systemd enabled), something like:
     "SDImg2ImgDenoise":      denoising strength for img2img refinements
     "SkipRewriteForTagPrompts": skip the LLM rewrite for comma-heavy tag prompts
     "ImageToolEnabled":      let the chat model decide when to draw via a generate_image tool (needs tool-calling support)
+    "LLMEnabled":            master switch for every language-model call. false = moderation-only mode: mod log, records,
+                             spam/flood detection, XP ranks, /wiki, highlights and stats keep working; chat replies, /ask,
+                             /lore, Translate, FAQ auto-answers, digests and image prompts are all off
+    "LLMDisabledNotice":     reply when someone DMs or @mentions the bot while LLMEnabled is false
     "ImageGenerationEnabled": master switch for all image generation (false disables every drawing path)
     "ImageDisabledNotice":   message shown when image generation is switched off
     "ImageRefusalMessage":   message shown when a prompt is refused by the safety filter

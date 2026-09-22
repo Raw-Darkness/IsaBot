@@ -293,8 +293,24 @@ class LLMResponseError(Exception):
     """Raised when the API returns 200 but no usable completion (e.g. provider error or content flag)."""
 
 
+def llm_enabled() -> bool:
+    """Master switch for every language-model call. False turns the bot into a
+    moderation/community-tools-only bot: no chat replies, no /ask, /lore, Translate,
+    FAQ auto-answers, daily digests or memory compression. Hot-reloads with the config."""
+    return bool(config.get("LLMEnabled", True))
+
+
+async def llm_unavailable(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(
+        config.get("LLMDisabledNotice", "Chat features are currently disabled."), ephemeral=True)
+
+
 async def chat_async(messages: list[dict[str, str]], _retries: int = 3, return_message: bool = False, **kwargs):
     """Run a chat completion with retry + exponential backoff."""
+    if not llm_enabled():
+        # Backstop: every feature checks llm_enabled() itself, but nothing may reach
+        # the API when the switch is off — including paths added later.
+        raise LLMResponseError("LLM calls are disabled (LLMEnabled=false)")
     kwargs.pop("reasoning", None)
     model = kwargs.pop("model", None) or config["OpenaiModel"]
     kwargs["extra_body"] = kwargs.get("extra_body", {})
@@ -698,7 +714,7 @@ class ConversationManager:
     async def maybe_compress(self, channel_id: int):
         """If the turn window is nearly full, summarize the oldest half."""
         cv = self.get(channel_id)
-        if len(cv.turns) < self._compress_at:
+        if len(cv.turns) < self._compress_at or not llm_enabled():
             return
 
         all_turns = list(cv.turns)
@@ -3012,6 +3028,15 @@ async def on_message(message: discord.Message):
                 return
             text_for_logic = re.sub(re.escape(bot_name), "", raw_text, flags=re.IGNORECASE).strip()
 
+        if not llm_enabled():
+            # Moderation-only mode: nothing is routed to the model. Answer only when
+            # someone addresses the bot directly, so open channels are not spammed.
+            addressed = isinstance(message.channel, discord.DMChannel) or (bot.user in message.mentions)
+            if addressed:
+                await safe_send(message.channel, config.get(
+                    "LLMDisabledNotice", "Chat features are currently disabled."))
+            return
+
         if should_route_to_image_followup(message):
             asyncio.create_task(handle_image_message(message, text_override=text_for_logic))
             return
@@ -3147,6 +3172,9 @@ async def ask_command(interaction: discord.Interaction, question: str):
         if not config.get("FAQEnabled", True):
             await interaction.response.send_message("The FAQ is currently disabled.", ephemeral=True)
             return
+        if not llm_enabled():
+            await llm_unavailable(interaction)
+            return
         if not _get_ask_bucket(interaction.user.id).consume():
             await interaction.response.send_message("Easy, darling — one question at a time. Try again in a moment.", ephemeral=True)
             return
@@ -3210,6 +3238,9 @@ async def lore_command(interaction: discord.Interaction, topic: str):
     try:
         if not LORE_CONTEXT:
             await interaction.response.send_message("I have no lore to share.", ephemeral=True)
+            return
+        if not llm_enabled():
+            await llm_unavailable(interaction)
             return
         if not _get_ask_bucket(interaction.user.id).consume():
             await interaction.response.send_message("Patience, darling — one tale at a time.", ephemeral=True)
@@ -3516,6 +3547,9 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         if not text:
             await interaction.response.send_message("Nothing to translate in that message.", ephemeral=True)
             return
+        if not llm_enabled():
+            await llm_unavailable(interaction)
+            return
         bucket = _translate_buckets.setdefault(interaction.user.id, TokenBucket(capacity=5, refill_rate=5.0 / 60.0))
         if not bucket.consume():
             await interaction.response.send_message("Easy, darling — a few translations a minute is plenty.", ephemeral=True)
@@ -3570,7 +3604,7 @@ _faq_evaluated: dict[int, float] = {}
 
 async def _faq_scan_once():
     forum_id = int(config.get("QuestionsForumID", 0))
-    if not forum_id or not config.get("FAQEnabled", True):
+    if not forum_id or not config.get("FAQEnabled", True) or not llm_enabled():
         return
     forum = bot.get_channel(forum_id)
     if forum is None or not hasattr(forum, "threads"):
@@ -3784,7 +3818,7 @@ async def _daily_summary_scheduler():
 
             # Scheduled digest can be disabled via config (manual !summary still works).
             # Checked here (not at startup) so it honors hot-reload.
-            if not config.get("DailySummaryEnabled", True):
+            if not config.get("DailySummaryEnabled", True) or not llm_enabled():
                 logging.info("Summary: scheduled digest disabled via config; skipping.")
                 continue
 

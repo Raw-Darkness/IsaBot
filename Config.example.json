@@ -124,6 +124,8 @@
     "FAQRetrievalMinTokens": 8000,
     "FAQRetrievalMaxTokens": 2500,
     "ImageToolEnabled": false,
+    "LLMEnabled": true,
+    "LLMDisabledNotice": "Chat features are currently disabled.",
     "ImageGenerationEnabled": true,
     "ImageDisabledNotice": "Image generation is currently disabled.",
     "ImageRefusalMessage": "That request is refused and has been reported to the moderators.",
