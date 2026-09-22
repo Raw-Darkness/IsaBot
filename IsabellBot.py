@@ -1324,7 +1324,7 @@ def image_prompt_blocked(text: str) -> str | None:
     # that only appears as a "(term:weight)" exclusion — the block is the same
     # either way, but the logged reason should be stable and the most telling.
     hits = [t for t in sorted(terms)
-            if (t in norm) if " " in t else re.search(rf"\b{re.escape(t)}\b", norm)]
+            if ((t in norm) if " " in t else re.search(rf"\b{re.escape(t)}\b", norm))]
     if hits:
         weighted_only = lambda t: len(re.findall(rf"\(\s*{re.escape(t)}\s*:\s*[\d.]+\s*\)", text, re.I)) \
             == len(re.findall(rf"\b{re.escape(t)}\b", text, re.I))
