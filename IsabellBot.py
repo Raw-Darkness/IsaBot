@@ -1526,6 +1526,7 @@ async def refuse_chat(channel, uid: int, name: str, matched: str, text: str, sou
             await _flag_to_mods(
                 f"Blocked chat — {'HARD term' if hard else 'contextual match, please verify'} ({source})",
                 f"User: **{name}** ({uid})\nMatched: `{matched}`\nText: {(text or '')[:300]}",
+                ping=hard,
             )
         except Exception:
             logging.exception("Could not alert mods about blocked chat")
@@ -1998,14 +1999,17 @@ async def _is_privileged(user_id: int) -> bool:
     return False
 
 
-async def _flag_to_mods(title: str, details: str):
+async def _flag_to_mods(title: str, details: str, ping: bool = True):
+    """Post to the mod channel. `ping=False` posts silently — for contextual matches
+    that may be false positives, so a "she is 5 foot 6" never pages every mod."""
     _flag_history.append((time.time(), title, details))
     if not MOD_CHANNEL_ID:
         return
     try:
         mod_ch = bot.get_channel(MOD_CHANNEL_ID) or await bot.fetch_channel(MOD_CHANNEL_ID)
         if mod_ch:
-            await safe_send(mod_ch, f"@here ⚠️ **{title}**\n{details}")
+            prefix = "@here " if ping else ""
+            await safe_send(mod_ch, f"{prefix}⚠️ **{title}**\n{details}")
     except Exception:
         logging.exception("Failed to send mod alert")
 
