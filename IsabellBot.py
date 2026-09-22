@@ -1473,6 +1473,12 @@ def chat_message_blocked(text: str, context: str = "") -> str | None:
 
     for term in _MINOR_DESCRIPTORS:
         in_msg = (term in norm) if " " in term else re.search(rf"\b{re.escape(term)}\b", norm)
+        # "the low teens" / "high teens" is a numeric range, not a person. Only
+        # skip when EVERY occurrence is preceded by such a cue.
+        if term == "teens" and in_msg:
+            occ = list(re.finditer(r"\bteens\b", norm))
+            if occ and all(re.search(r"\b(low|high|mid|upper|lower)\s*$", norm[:o.start()]) for o in occ):
+                in_msg = None
         if in_msg:
             return f"{term} + sexual context {_snippet(text, term)}"
         if context and term in _MINOR_DESCRIPTORS_CARRIED:
